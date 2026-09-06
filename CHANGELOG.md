@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.4 — Clipboard editing, pixel colors, and text extraction
+
+- Configurable Edit Clipboard Image shortcut (Option–3 by default) and a separate resizable editor.
+- Independent, remembered clipboard-edit output preference, defaulting to clipboard only.
+- Exact-pixel magnifying color picker (I); copies six uppercase hex digits without a hash. Option-click applies fill/background color.
+- Local Vision OCR (O), preserving detected line breaks. Drag a region or read the full crop from the menu.
+- Compact single-row toolbar with contextual style controls and horizontal scrolling on small screens.
+- Export, close, undo, redo and apply-crop actions moved into the overflow/right-click menu.
+- First Escape warns; a second within three seconds closes without exporting.
+- Enter adds a text newline; Control–Enter commits text. Removed text outlines, retaining background color.
+- Confirmed crop exclusions are much darker. Shading, lens and status messages never appear in exported images.
+- Regression checks for clipboard output independence, double-Escape, Retina pixel coordinates, hex validation and real multiline OCR.
+
 ## 1.3 — Frozen editor
 
 - Replaced overlapping region overlays with one guarded capture/edit session.

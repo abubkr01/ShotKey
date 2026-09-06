@@ -7,17 +7,21 @@ func XCTAssertEqual<T: Equatable>(_ a: T, _ b: T, file: StaticString = #file, li
 func XCTAssertLessThan<T: Comparable>(_ a: T, _ b: T, file: StaticString = #file, line: UInt = #line) { precondition(a < b, "\(a) is not < \(b)", file: file, line: line) }
 func XCTAssertGreaterThan<T: Comparable>(_ a: T, _ b: T, file: StaticString = #file, line: UInt = #line) { precondition(a > b, "\(a) is not > \(b)", file: file, line: line) }
 struct TestShortcut { var readable = "⌥1" }
-struct TestOutput { var title = "Save + Copy to Clipboard" }
+enum OutputMode: String {
+    case both, clipboardOnly, fileOnly
+    var title: String { rawValue }
+}
 class Preferences {
     static let shared = Preferences()
     let regionShortcut = TestShortcut()
-    let outputMode = TestOutput()
+    var outputMode = OutputMode.both
+    var clipboardOutputMode = OutputMode.clipboardOnly
 }
 class CaptureService {
     static let shared = CaptureService()
     var results: [CGImage] = []
     func deliver(_ image: CGImage) { results.append(image) }
-    func deliverOnMain(_ image: CGImage) -> Bool { results.append(image); return true }
+    func deliverOnMain(_ image: CGImage, mode: OutputMode? = nil) -> Bool { results.append(image); return true }
 }
 class AppDelegate {
     static var shared: AppDelegate? = AppDelegate()
@@ -131,6 +135,54 @@ XCTAssertEqual(interactionDocument.state.annotations.last!.text, "Hello\nWorld")
 interactionWindow.close()
 print("PASS canvas arrow movement, duplicate/delete, crop adjustment/undo, Shift-circle and multiline text")
 
+XCTAssertEqual(EditorColor(hex: "5785d1")!.hex, "5785D1")
+XCTAssertTrue(EditorColor(hex: "#5785D1") == nil)
+XCTAssertTrue(EditorColor(hex: "XYZ123") == nil)
+let retina = EditorDocument(image: tests.fixture(), size: CGSize(width: 320, height: 200))
+let pickCanvas = EditorCanvas(document: retina)
+pickCanvas.choose(.picker)
+XCTAssertEqual(EditorColor(pickCanvas.sampledColor(CGPoint(x: 20, y: 180))!).hex, "000000")
+XCTAssertEqual(EditorColor(pickCanvas.sampledColor(CGPoint(x: 20, y: 20))!).hex, "FFFFFF")
+XCTAssertEqual(EditorColor(pickCanvas.sampledColor(CGPoint(x: 320, y: 200))!).hex, "FFFFFF")
+print("PASS six-digit hex validation and exact Retina pixel orientation/edge clamping")
+pickCanvas.frame = retina.fullRect
+pickCanvas.mouseMoved(with: NSEvent.mouseEvent(with: .mouseMoved, location: CGPoint(x: 150, y: 100),
+    modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil, eventNumber: 0, clickCount: 0, pressure: 0)!)
+let lensRep = pickCanvas.bitmapImageRepForCachingDisplay(in: pickCanvas.bounds)!
+pickCanvas.cacheDisplay(in: pickCanvas.bounds, to: lensRep)
+try lensRep.representation(using: .png, properties: [:])!.write(to: directory.appendingPathComponent("pixel-lens.png"))
+
+let clipboard = NSPasteboard(name: NSPasteboard.Name("ShotKey.tests." + UUID().uuidString))
+clipboard.clearContents()
+clipboard.setData(NSBitmapImageRep(cgImage: tests.fixture()).representation(using: .png, properties: [:])!, forType: .png)
+let clipboardSession = EditorSession()
+clipboardSession.openClipboard(pasteboard: clipboard)
+XCTAssertTrue(clipboardSession.phase == .editing)
+XCTAssertTrue(clipboardSession.outputMode == .clipboardOnly)
+clipboardSession.outputMode = .fileOnly
+XCTAssertTrue(Preferences.shared.outputMode == .both)
+clipboardSession.outputMode = .clipboardOnly
+clipboardSession.requestCancel()
+XCTAssertTrue(clipboardSession.phase == .editing)
+clipboardSession.requestCancel()
+XCTAssertTrue(clipboardSession.phase == .idle)
+clipboardSession.openClipboard(pasteboard: clipboard)
+clipboardSession.finish()
+XCTAssertTrue(clipboardSession.phase == .idle)
+XCTAssertEqual(CaptureService.shared.results.last!.width, 640)
+clipboard.releaseGlobally()
+print("PASS independent clipboard output, full-resolution import, double-Escape and export")
+
+let ocrDocument = EditorDocument(image: tests.fixture(width: 1000, height: 400), size: CGSize(width: 1000, height: 400))
+var ocrState = EditorState()
+var ocrStyle = EditorStyle(); ocrStyle.color = EditorColor(.black); ocrStyle.fontSize = 34
+ocrState.annotations.append(Annotation(tool: .text, start: CGPoint(x: 530, y: 220),
+    end: CGPoint(x: 990, y: 390), style: ocrStyle, text: "First line\nSecond line"))
+ocrDocument.commit(ocrState)
+let recognized = try EditorOCR.recognize(ocrDocument.render()!)
+XCTAssertTrue(recognized.contains("First line\nSecond line"))
+print("PASS local Vision OCR recognizes text and retains line breaks")
+
 if CommandLine.arguments.contains("--preview") {
     app.setActivationPolicy(.accessory)
     let window = NSWindow(contentRect: CGRect(x: 100, y: 100, width: 1100, height: 700),
@@ -138,6 +190,7 @@ if CommandLine.arguments.contains("--preview") {
     window.title = "ShotKey Editor Preview"
     canvas.frame = CGRect(x: 0, y: 0, width: 1100, height: 700)
     window.contentView = canvas
+    canvas.choose(.rectangle); toolbar.refresh()
     window.center(); window.makeKeyAndOrderFront(nil)
     toolbar.presentPreview(window)
     print("PREVIEW_WINDOW \(window.windowNumber)")

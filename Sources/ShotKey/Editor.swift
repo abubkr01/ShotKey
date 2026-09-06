@@ -1,9 +1,10 @@
 import AppKit
 import ScreenCaptureKit
 import CoreImage
+import Vision
 
 enum EditorTool: String, CaseIterable, Codable {
-    case select, arrow, line, rectangle, ellipse, text, blur, crop
+    case select, arrow, line, rectangle, ellipse, text, blur, crop, picker, ocr
     var label: String {
         switch self {
         case .select: return "Select V"
@@ -14,11 +15,13 @@ enum EditorTool: String, CaseIterable, Codable {
         case .text: return "Text T"
         case .blur: return "Blur B"
         case .crop: return "Crop C"
+        case .picker: return "Pick color I"
+        case .ocr: return "Copy text O"
         }
     }
     static func key(_ key: String) -> EditorTool? {
         ["v": .select, "a": .arrow, "l": .line, "r": .rectangle,
-         "e": .ellipse, "t": .text, "b": .blur, "c": .crop][key]
+         "e": .ellipse, "t": .text, "b": .blur, "c": .crop, "i": .picker, "o": .ocr][key]
     }
 }
 
@@ -160,13 +163,9 @@ final class EditorDocument {
             let font = NSFont.systemFont(ofSize: s.fontSize, weight: .semibold)
             let paragraph = NSMutableParagraphStyle()
             paragraph.lineBreakMode = .byWordWrapping
-            var attributes: [NSAttributedString.Key: Any] = [
+            let attributes: [NSAttributedString.Key: Any] = [
                 .font: font, .foregroundColor: s.color.ns, .paragraphStyle: paragraph
             ]
-            if s.textOutline > 0 {
-                attributes[.strokeWidth] = -s.textOutline
-                attributes[.strokeColor] = s.outline.ns
-            }
             if s.textBackground {
                 s.fill.ns.setFill()
                 NSBezierPath(roundedRect: a.rect, xRadius: 7, yRadius: 7).fill()
@@ -191,11 +190,114 @@ final class EditorWindow: NSWindow {
 }
 
 /// There is one session, including during asynchronous snapshot acquisition.
-final class EditorSession: NSObject {
+final class EditorSession: NSObject, NSWindowDelegate {
     static let shared = EditorSession()
     enum Phase { case idle, loading, editing, finishing }
     private(set) var phase: Phase = .idle
     var isActive: Bool { phase != .idle }
+    private var clipboardSession = false
+    private var exitArmedAt: Date?
+    private var ocrRequest = UUID()
+    var outputMode: OutputMode {
+        get { clipboardSession ? Preferences.shared.clipboardOutputMode : Preferences.shared.outputMode }
+        set {
+            if clipboardSession { Preferences.shared.clipboardOutputMode = newValue }
+            else { Preferences.shared.outputMode = newValue }
+        }
+    }
+    func requestCancel() {
+        if let armed = exitArmedAt, Date().timeIntervalSince(armed) < 3 { cancel(); return }
+        canvas?.commitText()
+        _ = canvas?.cancelPending()
+        exitArmedAt = Date()
+        canvas?.showMessage("Press Esc again within 3 seconds to close without exporting")
+    }
+    func windowShouldClose(_ sender: NSWindow) -> Bool { requestCancel(); return false }
+    func openClipboard(pasteboard: NSPasteboard = .general) {
+        guard !isActive else {
+            window?.makeKeyAndOrderFront(nil)
+            canvas?.showMessage("Finish or close the current edit before opening another image")
+            return
+        }
+        guard let image = NSImage(pasteboard: pasteboard),
+              let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            AppDelegate.shared?.showErrorMessage("The clipboard does not contain an image. Copy an image first.")
+            return
+        }
+        clipboardSession = true; phase = .editing; generation = UUID()
+        let document = EditorDocument(image: cg, size: CGSize(width: cg.width, height: cg.height))
+        let visible = NSScreen.main?.visibleFrame ?? CGRect(x: 0, y: 0, width: 1000, height: 700)
+        let size = CGSize(width: min(1100, visible.width - 60), height: min(800, visible.height - 60))
+        let win = EditorWindow(contentRect: CGRect(origin: .zero, size: size),
+            styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: false)
+        win.title = "ShotKey — Clipboard Image"; win.isReleasedWhenClosed = false
+        win.minSize = CGSize(width: 420, height: 300); win.delegate = self
+        let scroll = NSScrollView(frame: CGRect(origin: .zero, size: size))
+        scroll.autoresizingMask = [.width, .height]
+        scroll.hasVerticalScroller = true; scroll.hasHorizontalScroller = true
+        scroll.allowsMagnification = true; scroll.minMagnification = 0.02; scroll.maxMagnification = 8
+        let view = EditorCanvas(document: document); view.frame = document.fullRect
+        scroll.documentView = view
+        win.contentView = scroll; window = win; canvas = view
+        let bar = EditorToolbar(canvas: view, session: self); toolbar = bar
+        wire(view, bar)
+        installMonitor()
+        win.center()
+        #if !EDITOR_TESTS
+        NSApp.activate(ignoringOtherApps: true); win.makeKeyAndOrderFront(nil)
+        #endif
+        scroll.magnification = min(1, min((size.width - 30) / document.size.width, (size.height - 80) / document.size.height))
+        win.makeFirstResponder(view); view.choose(.select)
+        bar.show(screen: win.screen ?? NSScreen.main!, parent: win)
+        view.showMessage("Clipboard image · ⌘S exports · output: " + outputMode.title)
+    }
+    private func installMonitor() {
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self else { return event }
+            if self.phase == .loading && event.keyCode == 53 { self.cancel(); return nil }
+            if self.phase == .editing { return self.handleKey(event) ? nil : event }
+            return event
+        }
+    }
+    func windowDidResize(_ notification: Notification) {
+        guard clipboardSession, let window, let screen = window.screen else { return }
+        toolbar?.show(screen: screen, parent: window)
+    }
+    private func wire(_ view: EditorCanvas, _ bar: EditorToolbar) {
+        view.onChange = { [weak bar] in bar?.refresh() }
+        view.onInteraction = { [weak self] in self?.exitArmedAt = nil }
+        view.onOCR = { [weak self] rect in self?.recognize(rect) }
+        view.onMenu = { [weak bar] in bar?.actionMenu() }
+    }
+    func recognize(_ rect: CGRect? = nil) {
+        guard let canvas, let image = canvas.document.render() else { return }
+        let area = rect ?? canvas.document.cropRect
+        let sx = CGFloat(image.width) / canvas.document.size.width
+        let sy = CGFloat(image.height) / canvas.document.size.height
+        let pixels = CGRect(x: area.minX * sx, y: (canvas.document.size.height - area.maxY) * sy,
+                            width: area.width * sx, height: area.height * sy).integral
+        guard let selection = image.cropping(to: pixels) else { return }
+        let token = generation
+        ocrRequest = UUID()
+        let requestToken = ocrRequest
+        canvas.showMessage("Reading text…")
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = Result { () throws -> String in
+                try EditorOCR.recognize(selection)
+            }
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.generation == token, self.ocrRequest == requestToken, self.phase == .editing else { return }
+                switch result {
+                case .success(let text):
+                    if text.isEmpty { self.canvas?.showMessage("No text found in that area"); return }
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(text, forType: .string)
+                    self.canvas?.showMessage("Text copied — line breaks preserved")
+                case .failure(let error): self.canvas?.showMessage("Could not read text: " + error.localizedDescription)
+                }
+            }
+        }
+    }
     private var generation = UUID()
     private var documents: [CGDirectDisplayID: EditorDocument] = [:]
     private var screens: [CGDirectDisplayID: NSScreen] = [:]
@@ -239,13 +341,8 @@ final class EditorSession: NSObject {
         phase = .loading
         generation = UUID()
         let token = generation
-        // Escape works even if capture is still awaiting the system.
-        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard let self else { return event }
-            if self.phase == .loading && event.keyCode == 53 { self.cancel(); return nil }
-            if self.phase == .editing { return self.handleKey(event) ? nil : event }
-            return event
-        }
+        clipboardSession = false
+        installMonitor()
         let candidates = NSScreen.screens.compactMap { screen -> (CGDirectDisplayID, NSScreen)? in
             guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { return nil }
             return (number.uint32Value, screen)
@@ -319,7 +416,7 @@ final class EditorSession: NSObject {
         newCanvas.choose(previousTool)
         let newToolbar = EditorToolbar(canvas: newCanvas, session: self)
         toolbar = newToolbar
-        newCanvas.onChange = { [weak newToolbar] in newToolbar?.refresh() }
+        wire(newCanvas, newToolbar)
         newToolbar.show(screen: screen, parent: newWindow)
     }
     func finish() {
@@ -332,7 +429,7 @@ final class EditorSession: NSObject {
             AppDelegate.shared?.showErrorMessage("The edited image could not be rendered. Your edits are still open.")
             return
         }
-        if CaptureService.shared.deliverOnMain(result) { cancel() }
+        if CaptureService.shared.deliverOnMain(result, mode: outputMode) { cancel() }
         else { phase = .editing }
     }
     @objc func cancel() {
@@ -344,14 +441,18 @@ final class EditorSession: NSObject {
         toolbar?.close(); toolbar = nil
         window?.close(); window = nil; canvas = nil
         documents.removeAll(); screens.removeAll(); activeID = nil
-        phase = .idle
+        phase = .idle; clipboardSession = false; exitArmedAt = nil
     }
     private func handleKey(_ event: NSEvent) -> Bool {
         guard let canvas else { return false }
+        if let eventWindow = event.window, eventWindow != window, toolbar?.owns(eventWindow) != true { return false }
         // Native text fields retain typing, selection, and their own undo stack.
         if event.keyCode == 53 {
-            if canvas.cancelPending() { return true }
-            cancel(); return true
+            requestCancel(); return true
+        }
+        exitArmedAt = nil
+        if (event.keyCode == 36 || event.keyCode == 76), event.modifierFlags.contains(.control) {
+            canvas.commitText(); return true
         }
         if canvas.isTyping { return false }
         let key = event.charactersIgnoringModifiers?.lowercased() ?? ""
@@ -391,6 +492,41 @@ final class EditorCanvas: NSView, NSTextViewDelegate {
     var tool = EditorTool.crop
     var style = EditorStyle.load(.crop)
     var onChange: (() -> Void)?
+    var onInteraction: (() -> Void)?
+    var onOCR: ((CGRect) -> Void)?
+    var onMenu: (() -> NSMenu?)?
+    private var message = ""
+    private var messageToken = UUID()
+    private var pickerPoint: CGPoint?
+    private var sampler: NSBitmapImageRep?
+    private var samplingTool = EditorTool.arrow
+    func showMessage(_ text: String) {
+        message = text; messageToken = UUID()
+        let token = messageToken
+        needsDisplay = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+            guard let self, self.messageToken == token else { return }
+            self.message = ""; self.needsDisplay = true
+        }
+    }
+    override func menu(for event: NSEvent) -> NSMenu? { onMenu?() }
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseMoved, .activeInKeyWindow, .inVisibleRect, .mouseEnteredAndExited],
+                                      owner: self, userInfo: nil))
+    }
+    override func mouseMoved(with event: NSEvent) {
+        guard tool == .picker else { return }
+        pickerPoint = point(event); needsDisplay = true
+    }
+    override func mouseExited(with event: NSEvent) { pickerPoint = nil; needsDisplay = true }
+    func sampledColor(_ point: CGPoint) -> NSColor? {
+        guard let sampler else { return nil }
+        let x = min(sampler.pixelsWide - 1, max(0, Int(point.x / document.size.width * CGFloat(sampler.pixelsWide))))
+        let y = min(sampler.pixelsHigh - 1, max(0, Int((document.size.height - point.y) / document.size.height * CGFloat(sampler.pixelsHigh))))
+        return sampler.colorAt(x: x, y: y)?.usingColorSpace(.sRGB)
+    }
     var pendingCrop: CGRect?
     private var selected: UUID?
     private var dragStart: CGPoint?
@@ -411,14 +547,19 @@ final class EditorCanvas: NSView, NSTextViewDelegate {
         bitmap = document.state.annotations.isEmpty ? document.image : document.render()
         super.init(frame: .zero)
         setAccessibilityElement(true)
-        setAccessibilityLabel("Frozen screenshot. A arrow, R rectangle, E ellipse, T text, B blur, C crop. Escape cancels.")
+        setAccessibilityLabel("Image editor. A arrow, R rectangle, E ellipse, T text, B blur, C crop, I color picker, O text recognition. Press Escape twice to close.")
     }
     required init?(coder: NSCoder) { fatalError() }
     override func resetCursorRects() {
         addCursorRect(bounds, cursor: tool == .select ? .arrow : tool == .text ? .iBeam : .crosshair)
     }
     func choose(_ next: EditorTool) {
+        onInteraction?()
         commitText(); dragStart = nil; draft = nil; original = nil; cropMoveOrigin = nil
+        if next == .picker {
+            samplingTool = tool == .picker ? samplingTool : tool
+            if let image = document.render() { sampler = NSBitmapImageRep(cgImage: image) }
+        } else { sampler = nil; pickerPoint = nil }
         tool = next; selected = nil; pendingCrop = nil
         style = EditorStyle.load(next)
         window?.makeFirstResponder(self)
@@ -446,9 +587,22 @@ final class EditorCanvas: NSView, NSTextViewDelegate {
         return CGPoint(x: min(max(p.x, r.minX), r.maxX), y: min(max(p.y, r.minY), r.maxY))
     }
     override func mouseDown(with event: NSEvent) {
+        onInteraction?()
         commitText()
         window?.makeFirstResponder(self)
         let p = point(event)
+        if tool == .picker {
+            if let color = sampledColor(p) {
+                let hex = EditorColor(color).hex
+                NSPasteboard.general.clearContents(); NSPasteboard.general.setString(hex, forType: .string)
+                choose(samplingTool)
+                var next = style
+                if event.modifierFlags.contains(.option) { next.fill = EditorColor(color) }
+                else { next.color = EditorColor(color) }
+                changeStyle(next); showMessage(hex + " copied · color applied")
+            }
+            return
+        }
         if tool == .text { beginText(at: p); return }
         if tool == .crop, event.clickCount == 2, pendingCrop?.contains(p) == true { applyCrop(); return }
         dragStart = p
@@ -534,6 +688,7 @@ final class EditorCanvas: NSView, NSTextViewDelegate {
             if a.rect.width >= 2 && a.rect.height >= 2 { pendingCrop = a.rect.intersection(document.cropRect) }
             return
         }
+        if tool == .ocr { if a.rect.width >= 2 && a.rect.height >= 2 { onOCR?(a.rect) }; return }
         var state = document.state
         if tool == .select {
             if let i = state.annotations.firstIndex(where: { $0.id == a.id }) { state.annotations[i] = a }
@@ -601,7 +756,7 @@ final class EditorCanvas: NSView, NSTextViewDelegate {
     }
     func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
         if commandSelector == #selector(NSResponder.insertNewline(_:)),
-           NSApp.currentEvent?.modifierFlags.contains(.shift) != true {
+           NSApp.currentEvent?.modifierFlags.contains(.control) == true {
             commitText(); return true
         }
         return false
@@ -631,7 +786,7 @@ final class EditorCanvas: NSView, NSTextViewDelegate {
     override func draw(_ dirtyRect: NSRect) {
         if let bitmap { NSImage(cgImage: bitmap, size: document.size).draw(in: bounds) }
         if let draft, tool != .crop && tool != .select {
-            if tool == .blur {
+            if tool == .blur || tool == .ocr {
                 NSColor.white.setStroke(); NSBezierPath(rect: draft.rect).stroke()
             } else { EditorDocument.draw(draft) }
         }
@@ -643,7 +798,7 @@ final class EditorCanvas: NSView, NSTextViewDelegate {
         if let crop {
             let shade = NSBezierPath(rect: bounds); shade.appendRect(crop)
             shade.windingRule = .evenOdd
-            NSColor.black.withAlphaComponent(0.55).setFill(); shade.fill()
+            NSColor.black.withAlphaComponent(pendingCrop == nil && dragStart == nil ? 0.94 : 0.55).setFill(); shade.fill()
             NSColor.white.setStroke()
             let border = NSBezierPath(rect: crop); border.lineWidth = 1; border.stroke()
             let sx = CGFloat(document.image.width) / document.size.width
@@ -667,6 +822,42 @@ final class EditorCanvas: NSView, NSTextViewDelegate {
             NSColor.white.setFill()
             NSBezierPath(rect: CGRect(x: a.end.x - 5, y: a.end.y - 5, width: 10, height: 10)).fill()
         }
+        if tool == .picker, let p = pickerPoint, let color = sampledColor(p), let sampler {
+            let zoom = enclosingScrollView?.magnification ?? 1
+            let visible = visibleRect.intersection(bounds)
+            let side: CGFloat = min(180 / zoom, max(26 / zoom, min(visible.width, visible.height - 30 / zoom)))
+            let cell = side / 13
+            let x = min(max(p.x + 24 / zoom, visible.minX), max(visible.minX, visible.maxX - side))
+            let y = min(max(p.y + 24 / zoom, visible.minY + 30 / zoom), max(visible.minY, visible.maxY - side))
+            let lens = CGRect(x: x, y: y, width: side, height: side)
+            NSGraphicsContext.saveGraphicsState()
+            NSBezierPath(ovalIn: lens).addClip()
+            let px = Int(p.x / document.size.width * CGFloat(sampler.pixelsWide))
+            let py = Int((document.size.height - p.y) / document.size.height * CGFloat(sampler.pixelsHigh))
+            for row in -6...6 { for col in -6...6 {
+                let cx = min(sampler.pixelsWide - 1, max(0, px + col))
+                let cy = min(sampler.pixelsHigh - 1, max(0, py + row))
+                (sampler.colorAt(x: cx, y: cy) ?? .black).setFill()
+                let box = CGRect(x: x + CGFloat(col + 6) * cell, y: y + CGFloat(6 - row) * cell, width: cell, height: cell)
+                box.fill(); NSColor.gray.withAlphaComponent(0.5).setStroke(); NSBezierPath(rect: box).stroke()
+            }}
+            let center = NSBezierPath(rect: CGRect(x: x + 6 * cell, y: y + 6 * cell, width: cell, height: cell))
+            NSColor.black.setStroke(); center.lineWidth = 3 / zoom; center.stroke()
+            NSColor.white.setStroke(); center.lineWidth = 1 / zoom; center.stroke()
+            NSGraphicsContext.restoreGraphicsState()
+            let rim = NSBezierPath(ovalIn: lens)
+            NSColor.black.setStroke(); rim.lineWidth = 3 / zoom; rim.stroke()
+            NSColor.white.setStroke(); rim.lineWidth = 1 / zoom; rim.stroke()
+            (EditorColor(color).hex as NSString).draw(at: CGPoint(x: x + 40 / zoom, y: y - 24 / zoom),
+                withAttributes: [.font: NSFont.monospacedSystemFont(ofSize: 16 / zoom, weight: .bold),
+                                 .foregroundColor: NSColor.white, .backgroundColor: NSColor.black])
+        }
+        if !message.isEmpty {
+            let zoom = enclosingScrollView?.magnification ?? 1
+            (message as NSString).draw(at: CGPoint(x: visibleRect.minX + 20 / zoom, y: visibleRect.minY + 24 / zoom),
+                withAttributes: [.font: NSFont.systemFont(ofSize: 15 / zoom, weight: .medium),
+                                 .foregroundColor: NSColor.white, .backgroundColor: NSColor.black])
+        }
     }
 }
 
@@ -674,100 +865,215 @@ final class EditorPanel: NSPanel {
     override var canBecomeKey: Bool { true }
 }
 
+extension EditorColor {
+    var hex: String {
+        [r, g, b].map { String(format: "%02X", Int((min(1, max(0, $0)) * 255).rounded())) }.joined()
+    }
+    init?(hex: String) {
+        guard hex.count == 6, hex.allSatisfy({ $0.isHexDigit }), let value = UInt32(hex, radix: 16) else { return nil }
+        self.init(NSColor(srgbRed: Double((value >> 16) & 255) / 255,
+                          green: Double((value >> 8) & 255) / 255, blue: Double(value & 255) / 255, alpha: 1))
+    }
+}
+
+enum EditorOCR {
+    static func recognize(_ image: CGImage) throws -> String {
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.usesLanguageCorrection = true
+        request.automaticallyDetectsLanguage = true
+        try VNImageRequestHandler(cgImage: image).perform([request])
+        let sorted = (request.results ?? []).sorted { $0.boundingBox.midY > $1.boundingBox.midY }
+        // Vision can split a printed line into several observations. Group those
+        // fragments into rows before ordering horizontally, without flattening lines.
+        var rows: [[VNRecognizedTextObservation]] = []
+        for item in sorted {
+            if let index = rows.indices.last, let first = rows[index].first,
+               abs(first.boundingBox.midY - item.boundingBox.midY) < min(first.boundingBox.height, item.boundingBox.height) * 0.4 {
+                rows[index].append(item)
+            } else { rows.append([item]) }
+        }
+        return rows.map { row in
+            row.sorted { $0.boundingBox.minX < $1.boundingBox.minX }
+                .compactMap { $0.topCandidates(1).first?.string }.joined(separator: " ")
+        }.joined(separator: "\n")
+    }
+}
+
 final class EditorToolbar: NSObject, NSTextFieldDelegate {
     private let panel: NSPanel
     private weak var canvas: EditorCanvas?
     private weak var session: EditorSession?
-    private var toolButtons: [NSButton] = []
+    private let row = NSStackView()
+    private var buttons: [NSButton] = []
     private let color = NSColorWell()
     private let fill = NSColorWell()
-    private let outlineColor = NSColorWell()
+    private let hex = NSTextField(string: "FF0000")
+    private let fillHex = NSTextField(string: "000000")
     private let width = NSTextField(string: "3")
     private let font = NSTextField(string: "28")
     private let blur = NSTextField(string: "14")
-    private let textStroke = NSTextField(string: "0")
     private let mode = NSPopUpButton()
-    private let background = NSButton(checkboxWithTitle: "Text background", target: nil, action: nil)
-    private let undoButton = NSButton()
-    private let redoButton = NSButton()
-    private let cropButton = NSButton()
-    private let status = NSTextField(labelWithString: "")
+    private let background = NSButton(checkboxWithTitle: "BG", target: nil, action: nil)
+    private var options: [NSView] = []
     init(canvas: EditorCanvas, session: EditorSession) {
         self.canvas = canvas; self.session = session
-        panel = EditorPanel(contentRect: CGRect(x: 0, y: 0, width: 1100, height: 150),
+        panel = EditorPanel(contentRect: CGRect(x: 0, y: 0, width: 900, height: 44),
             styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         super.init()
         panel.level = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue + 1)
         panel.isFloatingPanel = true; panel.hidesOnDeactivate = false
         panel.isMovableByWindowBackground = true; panel.hasShadow = true
-        panel.backgroundColor = NSColor.windowBackgroundColor
         panel.appearance = NSAppearance(named: .darkAqua)
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.isReleasedWhenClosed = false
-        let tools = NSStackView()
-        tools.orientation = .horizontal; tools.spacing = 4
+        let scroll = NSScrollView()
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        scroll.drawsBackground = false; scroll.hasHorizontalScroller = true
+        scroll.autohidesScrollers = true
+        row.orientation = .horizontal; row.spacing = 3; row.alignment = .centerY
+        row.translatesAutoresizingMaskIntoConstraints = false
+        scroll.documentView = row
+        let symbols = ["cursorarrow", "arrow.up.right", "line.diagonal", "rectangle", "circle", "textformat", "drop.halffull", "crop", "eyedropper", "text.viewfinder"]
         for (i, tool) in EditorTool.allCases.enumerated() {
-            let button = NSButton(title: tool.label, target: self, action: #selector(selectTool(_:)))
-            button.tag = i; button.bezelStyle = .rounded; button.setButtonType(.toggle)
-            toolButtons.append(button); tools.addArrangedSubview(button)
+            let button = NSButton(image: NSImage(systemSymbolName: symbols[i], accessibilityDescription: tool.label) ?? NSImage(),
+                                  target: self, action: #selector(selectTool(_:)))
+            button.tag = i; button.toolTip = tool.label; button.bezelStyle = .rounded
+            button.setButtonType(.toggle); button.widthAnchor.constraint(equalToConstant: 32).isActive = true
+            buttons.append(button); row.addArrangedSubview(button)
         }
-        configure(undoButton, "Undo ⌘Z", #selector(undo))
-        configure(redoButton, "Redo ⇧⌘Z", #selector(redo))
-        configure(cropButton, "✓ Crop", #selector(crop))
-        let done = NSButton(title: "Done " + Preferences.shared.regionShortcut.readable, target: self, action: #selector(finish))
-        done.bezelStyle = .rounded
-        let cancel = NSButton(title: "Cancel Esc", target: self, action: #selector(cancel))
-        cancel.bezelStyle = .rounded
-        let actions = NSStackView(views: [undoButton, redoButton, cropButton, done, cancel])
-        actions.spacing = 6
-        let top = tools
-        mode.addItems(withTitles: ["Outline", "Fill", "Outline + fill"])
-        mode.target = self; mode.action = #selector(styleChanged)
-        background.target = self; background.action = #selector(styleChanged)
-        for well in [color, fill, outlineColor] {
-            well.target = self; well.action = #selector(styleChanged)
-            well.widthAnchor.constraint(equalToConstant: 38).isActive = true
+        mode.addItems(withTitles: ["Stroke", "Fill", "Both"])
+        for control in [mode as NSControl, background, color, fill] {
+            control.target = self; control.action = #selector(styleChanged)
+        }
+        for well in [color, fill] {
+            well.widthAnchor.constraint(equalToConstant: 30).isActive = true
             well.heightAnchor.constraint(equalToConstant: 24).isActive = true
         }
-        for field in [width, font, blur, textStroke] {
-            field.delegate = self
-            field.widthAnchor.constraint(equalToConstant: 45).isActive = true
+        color.toolTip = "Stroke / text color"; fill.toolTip = "Shape fill / text background color"
+        for field in [hex, fillHex, width, font, blur] {
+            field.delegate = self; field.target = self; field.action = #selector(commitField)
+            field.widthAnchor.constraint(equalToConstant: field == hex || field == fillHex ? 64 : 40).isActive = true
             field.alignment = .center
-            field.target = self; field.action = #selector(styleChanged)
         }
-        let options = NSStackView(views: [
-            label("Color"), color, label("Fill"), fill, mode, label("Stroke"), width,
-            label("Text size"), font, background, label("Text outline"), textStroke,
-            outlineColor, label("Blur"), blur
-        ])
-        options.spacing = 7
-        status.font = .systemFont(ofSize: 11); status.textColor = .secondaryLabelColor
-        let stack = NSStackView(views: [top, options, actions, status])
-        stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 9
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        panel.contentView!.addSubview(stack)
+        hex.toolTip = "Color: six hexadecimal digits, no #"
+        fillHex.toolTip = "Background / fill: six hexadecimal digits, no #"
+        width.toolTip = "Stroke width"; font.toolTip = "Text size"; blur.toolTip = "Blur strength"
+        let more = NSButton(image: NSImage(systemSymbolName: "ellipsis.circle", accessibilityDescription: "Editor actions")!,
+                            target: self, action: #selector(showMenu(_:)))
+        more.translatesAutoresizingMaskIntoConstraints = false; more.bezelStyle = .rounded
+        let root = panel.contentView!
+        root.addSubview(scroll); root.addSubview(more)
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: panel.contentView!.leadingAnchor, constant: 14),
-            stack.topAnchor.constraint(equalTo: panel.contentView!.topAnchor, constant: 12),
-            stack.trailingAnchor.constraint(lessThanOrEqualTo: panel.contentView!.trailingAnchor, constant: -14)
+            scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 6),
+            scroll.topAnchor.constraint(equalTo: root.topAnchor, constant: 4),
+            scroll.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -4),
+            scroll.trailingAnchor.constraint(equalTo: more.leadingAnchor, constant: -3),
+            more.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -6),
+            more.centerYAnchor.constraint(equalTo: root.centerYAnchor),
+            more.widthAnchor.constraint(equalToConstant: 32),
+            row.heightAnchor.constraint(equalToConstant: 32)
         ])
         refresh()
     }
-    private func label(_ title: String) -> NSTextField { NSTextField(labelWithString: title) }
-    private func configure(_ button: NSButton, _ title: String, _ action: Selector) {
-        button.title = title; button.target = self; button.action = action; button.bezelStyle = .rounded
-    }
     func show(screen: NSScreen, parent: NSWindow) {
-        panel.setFrameOrigin(CGPoint(x: screen.frame.midX - panel.frame.width / 2, y: screen.frame.maxY - 155))
+        let available = parent.styleMask.contains(.titled) ? parent.frame : screen.visibleFrame
+        panel.setContentSize(CGSize(width: min(900, available.width - 20), height: 44))
+        panel.setFrameOrigin(CGPoint(x: available.midX - panel.frame.width / 2, y: available.maxY - (parent.styleMask.contains(.titled) ? 76 : 52)))
         #if !EDITOR_TESTS
-        parent.addChildWindow(panel, ordered: .above)
+        if panel.parent == nil { parent.addChildWindow(panel, ordered: .above) }
+        panel.hidesOnDeactivate = parent.styleMask.contains(.titled)
         panel.orderFrontRegardless()
         #endif
+        refresh()
     }
+    func owns(_ window: NSWindow) -> Bool { panel == window }
+    func close() { panel.parent?.removeChildWindow(panel); panel.close() }
+    func toggleVisible() { if panel.isVisible { panel.orderOut(nil) } else { panel.orderFrontRegardless() } }
+    func refresh() {
+        guard let canvas else { return }
+        let s = canvas.style, tool = canvas.selectedTool
+        for (i, button) in buttons.enumerated() { button.state = EditorTool.allCases[i] == canvas.tool ? .on : .off }
+        color.color = s.color.ns; fill.color = s.fill.ns
+        hex.stringValue = s.color.hex; fillHex.stringValue = s.fill.hex
+        width.doubleValue = s.width; font.doubleValue = s.fontSize; blur.doubleValue = s.blur
+        mode.selectItem(at: s.fillMode); background.state = s.textBackground ? .on : .off
+        var nextOptions: [NSView] = []
+        switch tool {
+        case .arrow, .line: nextOptions = [color, hex, width]
+        case .rectangle, .ellipse: nextOptions = [color, hex, width, mode, fill, fillHex]
+        case .text: nextOptions = [color, hex, font, background, fill, fillHex]
+        case .blur: nextOptions = [blur]
+        default: break
+        }
+        if options != nextOptions {
+            options.forEach { row.removeArrangedSubview($0); $0.removeFromSuperview() }
+            options = nextOptions
+            options.forEach { row.addArrangedSubview($0) }
+        }
+        row.layoutSubtreeIfNeeded()
+        if let parent = panel.parent {
+            let maxWidth = max(300, min(parent.frame.width - 20, parent.screen?.visibleFrame.width ?? 900))
+            let target = min(maxWidth, row.fittingSize.width + 56)
+            panel.setFrame(CGRect(x: parent.frame.midX - target / 2, y: panel.frame.minY, width: target, height: 44), display: true)
+        }
+    }
+    func actionMenu() -> NSMenu {
+        let menu = NSMenu()
+        func add(_ title: String, _ action: Selector, enabled: Bool = true) {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            item.target = self; item.isEnabled = enabled; menu.addItem(item)
+        }
+        menu.autoenablesItems = false
+        add("Export image · ⌘S", #selector(finish))
+        add("Apply crop · Enter", #selector(crop), enabled: canvas?.pendingCrop != nil)
+        add("Undo · ⌘Z", #selector(undo), enabled: canvas?.document.undoStates.isEmpty == false)
+        add("Redo · ⇧⌘Z", #selector(redo), enabled: canvas?.document.redoStates.isEmpty == false)
+        add("Copy all visible text (OCR)", #selector(ocr))
+        menu.addItem(.separator())
+        for (index, mode) in [OutputMode.both, .clipboardOnly, .fileOnly].enumerated() {
+            let item = NSMenuItem(title: mode.title, action: #selector(setOutput(_:)), keyEquivalent: "")
+            item.target = self; item.tag = index; item.state = session?.outputMode == mode ? .on : .off
+            menu.addItem(item)
+        }
+        menu.addItem(.separator())
+        add("Close without exporting · Esc twice", #selector(cancel))
+        return menu
+    }
+    @objc private func showMenu(_ sender: NSButton) { actionMenu().popUp(positioning: nil, at: CGPoint(x: 0, y: sender.bounds.minY), in: sender) }
+    @objc private func setOutput(_ sender: NSMenuItem) {
+        session?.outputMode = [OutputMode.both, .clipboardOnly, .fileOnly][sender.tag]
+        canvas?.showMessage("Output: " + (session?.outputMode.title ?? ""))
+    }
+    @objc private func selectTool(_ sender: NSButton) { canvas?.choose(EditorTool.allCases[sender.tag]) }
+    @objc private func commitField() {
+        guard EditorColor(hex: hex.stringValue) != nil, EditorColor(hex: fillHex.stringValue) != nil else {
+            canvas?.showMessage("Use exactly six hexadecimal digits, such as 5785D1"); refresh(); return
+        }
+        color.color = EditorColor(hex: hex.stringValue)!.ns; fill.color = EditorColor(hex: fillHex.stringValue)!.ns
+        styleChanged(); canvas?.window?.makeFirstResponder(canvas)
+    }
+    @objc private func styleChanged() {
+        guard let canvas else { return }
+        var s = canvas.style
+        s.color = EditorColor(color.color); s.fill = EditorColor(fill.color)
+        s.width = min(40, max(1, width.doubleValue)); s.fontSize = min(240, max(8, font.doubleValue))
+        s.blur = min(100, max(1, blur.doubleValue))
+        s.fillMode = max(0, mode.indexOfSelectedItem); s.textBackground = background.state == .on
+        s.textOutline = 0
+        canvas.changeStyle(s)
+    }
+    func controlTextDidEndEditing(_ obj: Notification) { commitField() }
+    @objc private func undo() { canvas?.history(redo: false) }
+    @objc private func redo() { canvas?.history(redo: true) }
+    @objc private func crop() { canvas?.applyCrop() }
+    @objc private func ocr() { canvas?.commitText(); session?.recognize() }
+    @objc private func finish() { panel.makeFirstResponder(nil); session?.finish() }
+    @objc private func cancel() { session?.requestCancel() }
     #if EDITOR_TESTS
     func presentPreview(_ parent: NSWindow) {
         parent.addChildWindow(panel, ordered: .above)
-        panel.setFrameOrigin(CGPoint(x: parent.frame.minX, y: parent.frame.maxY - 165))
+        show(screen: parent.screen ?? NSScreen.main!, parent: parent)
         panel.orderFrontRegardless()
     }
     func writePreview(_ url: URL) throws {
@@ -778,41 +1084,4 @@ final class EditorToolbar: NSObject, NSTextFieldDelegate {
         try rep.representation(using: .png, properties: [:])!.write(to: url)
     }
     #endif
-    func close() { panel.parent?.removeChildWindow(panel); panel.close() }
-    func toggleVisible() { if panel.isVisible { panel.orderOut(nil) } else { panel.orderFrontRegardless() } }
-    func refresh() {
-        guard let canvas else { return }
-        let s = canvas.style, tool = canvas.selectedTool
-        for (i, button) in toolButtons.enumerated() { button.state = EditorTool.allCases[i] == canvas.tool ? .on : .off }
-        color.color = s.color.ns; fill.color = s.fill.ns; outlineColor.color = s.outline.ns
-        width.doubleValue = s.width; font.doubleValue = s.fontSize
-        blur.doubleValue = s.blur; textStroke.doubleValue = s.textOutline
-        mode.selectItem(at: s.fillMode); background.state = s.textBackground ? .on : .off
-        mode.isEnabled = [.rectangle, .ellipse].contains(tool)
-        font.isEnabled = tool == .text; background.isEnabled = tool == .text
-        textStroke.isEnabled = tool == .text; outlineColor.isEnabled = tool == .text
-        blur.isEnabled = tool == .blur
-        undoButton.isEnabled = !canvas.document.undoStates.isEmpty
-        redoButton.isEnabled = !canvas.document.redoStates.isEmpty
-        cropButton.isEnabled = canvas.pendingCrop != nil
-        status.stringValue = "Frozen screen · Drag to crop, or choose a tool · Shift: circle / square / snapped line · V: move / resize · Text: Enter commits, Shift–Enter adds a line · Tab hides toolbar · " + Preferences.shared.outputMode.title
-    }
-    @objc private func selectTool(_ sender: NSButton) { canvas?.choose(EditorTool.allCases[sender.tag]) }
-    @objc private func styleChanged() {
-        guard let canvas else { return }
-        var s = canvas.style
-        s.color = EditorColor(color.color); s.fill = EditorColor(fill.color); s.outline = EditorColor(outlineColor.color)
-        s.width = min(40, max(1, width.doubleValue))
-        s.fontSize = min(240, max(8, font.doubleValue))
-        s.blur = min(100, max(1, blur.doubleValue))
-        s.textOutline = min(20, max(0, textStroke.doubleValue))
-        s.fillMode = max(0, mode.indexOfSelectedItem); s.textBackground = background.state == .on
-        canvas.changeStyle(s)
-    }
-    func controlTextDidEndEditing(_ obj: Notification) { styleChanged() }
-    @objc private func undo() { canvas?.history(redo: false) }
-    @objc private func redo() { canvas?.history(redo: true) }
-    @objc private func crop() { canvas?.applyCrop() }
-    @objc private func finish() { panel.makeFirstResponder(nil); session?.finish() }
-    @objc private func cancel() { session?.cancel() }
 }

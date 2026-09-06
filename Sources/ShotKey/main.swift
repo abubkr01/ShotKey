@@ -95,6 +95,15 @@ final class Preferences {
         }
     }
 
+    var clipboardShortcut: Shortcut {
+        get { Shortcut(keyCode: UInt32(defaults.object(forKey: "clipboardKey") as? Int ?? 20),
+                       modifiers: UInt32(defaults.object(forKey: "clipboardModifiers") as? Int ?? 2048)) }
+        set { defaults.set(Int(newValue.keyCode), forKey: "clipboardKey"); defaults.set(Int(newValue.modifiers), forKey: "clipboardModifiers") }
+    }
+    var clipboardOutputMode: OutputMode {
+        get { OutputMode(rawValue: defaults.string(forKey: "clipboardOutputMode") ?? "clipboardOnly") ?? .clipboardOnly }
+        set { defaults.set(newValue.rawValue, forKey: "clipboardOutputMode") }
+    }
     var saveFolder: URL {
         get {
             if let path = defaults.string(forKey: DefaultsKey.saveFolder) { return URL(fileURLWithPath: path, isDirectory: true) }
@@ -176,9 +185,9 @@ final class CaptureService {
         DispatchQueue.main.async { [self] in deliverOnMain(image) }
     }
 
-    @discardableResult func deliverOnMain(_ image: CGImage) -> Bool {
+    @discardableResult func deliverOnMain(_ image: CGImage, mode override: OutputMode? = nil) -> Bool {
         let prefs = Preferences.shared
-        let mode = prefs.outputMode
+        let mode = override ?? prefs.outputMode
         var copied = false
         if mode != .fileOnly {
             let representation = NSBitmapImageRep(cgImage: image)
@@ -219,6 +228,7 @@ private final class HotKeyManager {
     static let shared = HotKeyManager()
     private var captureRef: EventHotKeyRef?
     private var regionRef: EventHotKeyRef?
+    private var clipboardRef: EventHotKeyRef?
     private var handler: EventHandlerRef?
 
     func install() {
@@ -230,6 +240,7 @@ private final class HotKeyManager {
                 DispatchQueue.main.async {
                     if hotKeyID.id == 1 { CaptureService.shared.captureDisplayUnderPointer() }
                     if hotKeyID.id == 2 { SelectionCoordinator.shared.begin() }
+                    if hotKeyID.id == 3 { EditorSession.shared.openClipboard() }
                 }
                 return noErr
             }, 1, &type, nil, &handler)
@@ -240,6 +251,7 @@ private final class HotKeyManager {
     func reload() {
         if let captureRef { UnregisterEventHotKey(captureRef) }
         if let regionRef { UnregisterEventHotKey(regionRef) }
+        if let clipboardRef { UnregisterEventHotKey(clipboardRef) }
         let signature: OSType = 0x53484B59 // SHKY
         let captureID = EventHotKeyID(signature: signature, id: 1)
         let regionID = EventHotKeyID(signature: signature, id: 2)
@@ -247,7 +259,10 @@ private final class HotKeyManager {
         let region = Preferences.shared.regionShortcut
         let captureStatus = RegisterEventHotKey(capture.keyCode, capture.modifiers, captureID, GetApplicationEventTarget(), 0, &captureRef)
         let regionStatus = RegisterEventHotKey(region.keyCode, region.modifiers, regionID, GetApplicationEventTarget(), 0, &regionRef)
-        if captureStatus != noErr || regionStatus != noErr {
+        let clipboard = Preferences.shared.clipboardShortcut
+        let clipboardStatus = RegisterEventHotKey(clipboard.keyCode, clipboard.modifiers,
+            EventHotKeyID(signature: signature, id: 3), GetApplicationEventTarget(), 0, &clipboardRef)
+        if captureStatus != noErr || regionStatus != noErr || clipboardStatus != noErr {
             AppDelegate.shared?.showErrorMessage("One shortcut is already used by macOS or another app. Choose a different shortcut in Settings.")
         }
         AppDelegate.shared?.refreshMenu()
@@ -296,13 +311,15 @@ private final class ShortcutRecorderButton: NSButton {
 private final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private let folderLabel = NSTextField(labelWithString: "")
     private let captureButton = ShortcutRecorderButton(shortcut: Preferences.shared.captureShortcut)
+    private let clipboardButton = ShortcutRecorderButton(shortcut: Preferences.shared.clipboardShortcut)
+    private let clipboardOutputPopup = NSPopUpButton()
     private let regionButton = ShortcutRecorderButton(shortcut: Preferences.shared.regionShortcut)
     private let formatPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let outputPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let loginCheckbox = NSButton(checkboxWithTitle: "Launch ShotKey when I log in", target: nil, action: nil)
 
     init() {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 570, height: 495), styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 590), styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
         window.title = "ShotKey Settings"
         window.center()
         window.isReleasedWhenClosed = false
@@ -350,9 +367,14 @@ private final class SettingsWindowController: NSWindowController, NSWindowDelega
             HotKeyManager.shared.reload()
         }
 
+        clipboardButton.onChange = { shortcut in
+            Preferences.shared.clipboardShortcut = shortcut
+            HotKeyManager.shared.reload()
+        }
         let shortcutGrid = NSGridView(views: [
             [NSTextField(labelWithString: "Display under pointer"), captureButton, NSButton(title: "Try", target: self, action: #selector(tryDisplayCapture))],
-            [NSTextField(labelWithString: "Freeze & edit"), regionButton, NSButton(title: "Try", target: self, action: #selector(tryRegionCapture))]
+            [NSTextField(labelWithString: "Freeze & edit"), regionButton, NSButton(title: "Try", target: self, action: #selector(tryRegionCapture))],
+            [NSTextField(labelWithString: "Edit clipboard image"), clipboardButton, NSButton(title: "Try", target: self, action: #selector(tryClipboard))]
         ])
         shortcutGrid.rowSpacing = 12
         shortcutGrid.columnSpacing = 20
@@ -384,17 +406,22 @@ private final class SettingsWindowController: NSWindowController, NSWindowDelega
         outputRow.orientation = .horizontal
         outputRow.spacing = 18
 
+        clipboardOutputPopup.addItems(withTitles: [OutputMode.both.title, OutputMode.clipboardOnly.title, OutputMode.fileOnly.title])
+        clipboardOutputPopup.selectItem(withTitle: Preferences.shared.clipboardOutputMode.title)
+        clipboardOutputPopup.target = self; clipboardOutputPopup.action = #selector(clipboardOutputChanged)
+        let clipboardOutputRow = NSStackView(views: [NSTextField(labelWithString: "Clipboard edits"), clipboardOutputPopup])
+        clipboardOutputRow.spacing = 18
         loginCheckbox.state = SMAppService.mainApp.status == .enabled ? .on : .off
         loginCheckbox.target = self
         loginCheckbox.action = #selector(loginChanged)
 
-        let note = NSTextField(wrappingLabelWithString: "The first shortcut captures immediately. The second freezes the screen for cropping and annotation; press it again to finish. Escape cancels.")
+        let note = NSTextField(wrappingLabelWithString: "The first shortcut captures immediately. The second freezes the screen for cropping and annotation; press it again to finish. Press Escape twice to close. Clipboard edits open in a separate window.")
         note.textColor = .secondaryLabelColor
         note.font = .systemFont(ofSize: 12)
 
         let shortcutsLabel = sectionLabel("SHORTCUTS")
         let destinationLabel = sectionLabel("SAVE LOCATION")
-        let stack = NSStackView(views: [header, shortcutsLabel, shortcutGrid, destinationLabel, folderRow, formatRow, outputRow, loginCheckbox, note])
+        let stack = NSStackView(views: [header, shortcutsLabel, shortcutGrid, destinationLabel, folderRow, formatRow, outputRow, clipboardOutputRow, loginCheckbox, note])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 16
@@ -439,6 +466,10 @@ private final class SettingsWindowController: NSWindowController, NSWindowDelega
 
     @objc private func formatChanged() { Preferences.shared.imageFormat = formatPopup.titleOfSelectedItem == "JPEG" ? "jpg" : "png" }
 
+    @objc private func tryClipboard() { EditorSession.shared.openClipboard() }
+    @objc private func clipboardOutputChanged() {
+        Preferences.shared.clipboardOutputMode = OutputMode.allCasesForMenu.first { $0.title == clipboardOutputPopup.titleOfSelectedItem } ?? .clipboardOnly
+    }
     @objc private func outputModeChanged() {
         let title = outputPopup.titleOfSelectedItem
         Preferences.shared.outputMode = OutputMode.allCasesForMenu.first(where: { $0.title == title }) ?? .both
@@ -558,6 +589,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         region.toolTip = Preferences.shared.regionShortcut.readable
         menu.addItem(capture)
         menu.addItem(region)
+        menu.addItem(NSMenuItem(title: "Edit Clipboard Image", action: #selector(editClipboard), keyEquivalent: ""))
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Settings…", action: #selector(showSettings), keyEquivalent: ","))
         menu.addItem(NSMenuItem(title: "Open Screenshots Folder", action: #selector(openFolder), keyEquivalent: ""))
@@ -569,6 +601,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func captureDisplay() { CaptureService.shared.captureDisplayUnderPointer() }
     @objc private func captureRegion() { SelectionCoordinator.shared.begin() }
+    @objc private func editClipboard() { EditorSession.shared.openClipboard() }
     @objc private func showSettings() { settings.show() }
     @objc private func openFolder() { NSWorkspace.shared.open(Preferences.shared.saveFolder) }
     @objc private func quit() { NSApp.terminate(nil) }

@@ -1,6 +1,6 @@
 # ShotKey
 
-The experimental 1.3 editor is documented in [Frozen screenshot editor](docs/EDITOR.md). The `checkpoint/v1.2.0` branch preserves the original release.
+The experimental 1.4 editor is documented in [Frozen screenshot editor](docs/EDITOR.md). The `checkpoint/v1.2.0` branch preserves the original release.
 
 <p align="center">
   <img src="docs/images/shotkey-icon.png" width="128" alt="ShotKey app icon">
@@ -13,6 +13,8 @@ I made ShotKey because taking a screenshot on my Mac felt like more work than it
 I also wanted a second shortcut where I could drag a rectangle around exactly what I needed, release the mouse, and be done. The result should go where *I* want it: into a folder, onto the clipboard, or both.
 
 So I created ShotKey. It is a small native menu-bar app focused on making those two actions fast and dependable.
+
+Then I kept reaching for a few more things: an arrow, a quick crop, a color from one exact pixel, or text I could copy out of a screenshot. I wanted those right there, without opening another app. The editor now does that too. I can also bring in an image from my clipboard, edit it, and copy it back without leaving another file on my Desktop.
 
 ![ShotKey settings showing its shortcuts and output options](docs/images/shotkey-settings.png)
 

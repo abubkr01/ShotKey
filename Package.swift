@@ -14,6 +14,7 @@ let package = Package(
                 .linkedFramework("CoreGraphics"),
                 .linkedFramework("ImageIO"),
                 .linkedFramework("ScreenCaptureKit"),
+                .linkedFramework("Vision"),
                 .linkedFramework("UniformTypeIdentifiers"),
                 .linkedFramework("ServiceManagement")
             ]
