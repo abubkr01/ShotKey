@@ -16,10 +16,12 @@ Try these steps in order:
 If the stale entry remains, reset ShotKey's Screen Recording permission in Terminal:
 
 ```bash
-tccutil reset ScreenCapture com.abubakar.ShotKey
+tccutil reset ScreenCapture com.abubakar.shotkey
 ```
 
 Then open `/Applications/ShotKey.app` and grant access again.
+
+The bundle identifier must match exactly, including capitalization. Developers can use the reusable [macOS Screen Capture Development Guide](MACOS_SCREEN_CAPTURE_GUIDE.md) for signing diagnostics, ScreenCaptureKit implementation notes, and multi-display testing.
 
 ## The shortcut does nothing
 

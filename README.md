@@ -41,7 +41,7 @@ ShotKey 1.2 currently provides an Apple silicon build for macOS 14 or newer.
 
 macOS may warn that it cannot verify an independently distributed app. If that happens, open **System Settings → Privacy & Security**, scroll down, and choose **Open Anyway** for ShotKey.
 
-If macOS shows the permission as enabled but ShotKey still cannot capture, follow the short [permission repair guide](docs/TROUBLESHOOTING.md).
+If macOS shows the permission as enabled but ShotKey still cannot capture, follow the short [permission repair guide](docs/TROUBLESHOOTING.md). Developers building any screen-capture app can use the more complete [macOS Screen Capture Development Guide](docs/MACOS_SCREEN_CAPTURE_GUIDE.md).
 
 ## Using it
 

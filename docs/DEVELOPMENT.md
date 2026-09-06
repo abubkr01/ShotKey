@@ -30,6 +30,8 @@ The local build is ad-hoc signed. A rebuild can receive a different code identit
 
 For stable distribution, use an Apple Developer ID certificate and notarize the application. That gives future builds a stable identity and avoids Gatekeeper warnings.
 
+For the complete explanation of the permission failure we encountered, the ScreenCaptureKit solution, and a reusable checklist for other apps, see [macOS Screen Capture Development Guide](MACOS_SCREEN_CAPTURE_GUIDE.md).
+
 ## Version checkpoint
 
 The branch `checkpoint/v1.2.0` and local tag `v1.2.0` mark the working release with clipboard output modes and corrected multi-display area selection.
