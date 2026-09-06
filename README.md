@@ -33,7 +33,7 @@ So I created ShotKey. It is a small native menu-bar app focused on making those 
 
 ShotKey 1.2 currently provides an Apple silicon build for macOS 14 or newer.
 
-1. Download [ShotKey 1.2](outputs/ShotKey-1.2.dmg).
+1. Download [ShotKey 1.2](https://github.com/abubkr01/ShotKey/releases/latest/download/ShotKey-1.2.dmg).
 2. Open the DMG and drag ShotKey into **Applications**.
 3. Open ShotKey and allow **Screen & System Audio Recording** when macOS asks.
 4. Use **Quit & Reopen** if macOS shows that button.
