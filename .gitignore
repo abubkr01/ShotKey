@@ -3,5 +3,6 @@ work/
 .DS_Store
 outputs/ShotKey.app/
 outputs/*.dmg
+!outputs/ShotKey-1.2.dmg
 *.xcuserstate
 DerivedData/

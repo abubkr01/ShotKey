@@ -32,16 +32,16 @@ For stable distribution, use an Apple Developer ID certificate and notarize the 
 
 ## Version checkpoint
 
-The tag `v1.2.0` marks the working release with clipboard output modes and corrected multi-display area selection.
+The branch `checkpoint/v1.2.0` and local tag `v1.2.0` mark the working release with clipboard output modes and corrected multi-display area selection.
 
 To inspect that exact version without disturbing current work:
 
 ```bash
-git switch --detach v1.2.0
+git switch checkpoint/v1.2.0
 ```
 
 To start an experiment safely:
 
 ```bash
-git switch -c experiment/my-idea v1.2.0
+git switch -c experiment/my-idea checkpoint/v1.2.0
 ```

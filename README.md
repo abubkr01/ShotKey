@@ -33,7 +33,7 @@ So I created ShotKey. It is a small native menu-bar app focused on making those 
 
 ShotKey 1.2 currently provides an Apple silicon build for macOS 14 or newer.
 
-1. Download [ShotKey 1.2](https://github.com/abubkr01/ShotKey/releases/latest/download/ShotKey-1.2.dmg).
+1. Download [ShotKey 1.2](outputs/ShotKey-1.2.dmg).
 2. Open the DMG and drag ShotKey into **Applications**.
 3. Open ShotKey and allow **Screen & System Audio Recording** when macOS asks.
 4. Use **Quit & Reopen** if macOS shows that button.
@@ -74,7 +74,7 @@ More detail is in [Development](docs/DEVELOPMENT.md).
 
 This release solves the part I missed most from ShareX: fast capture with predictable output. Later experiments may add a lightweight editor for arrows, rectangles, text, blur, and other quick annotations. I want to keep the basic capture experience simple even as the app grows.
 
-The working v1.2 state is preserved in the `v1.2.0` Git tag, so future experiments can always return to this exact checkpoint.
+The working v1.2 state is preserved in the `checkpoint/v1.2.0` branch and the local `v1.2.0` tag, so future experiments can always return to this exact checkpoint.
 
 ## License
 
