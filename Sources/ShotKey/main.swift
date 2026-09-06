@@ -17,7 +17,7 @@ private enum DefaultsKey {
     static let hasLaunched = "hasLaunched"
 }
 
-private enum OutputMode: String {
+enum OutputMode: String {
     case both, clipboardOnly, fileOnly
 
     var title: String {
@@ -29,7 +29,7 @@ private enum OutputMode: String {
     }
 }
 
-private struct Shortcut: Equatable {
+struct Shortcut: Equatable {
     var keyCode: UInt32
     var modifiers: UInt32
 
@@ -69,7 +69,7 @@ private struct Shortcut: Equatable {
     }
 }
 
-private final class Preferences {
+final class Preferences {
     static let shared = Preferences()
     private let defaults = UserDefaults.standard
 
@@ -126,7 +126,7 @@ private enum CaptureError: LocalizedError {
     }
 }
 
-private final class CaptureService {
+final class CaptureService {
     static let shared = CaptureService()
 
     func ensurePermission(prompt: Bool = true) -> Bool {
@@ -144,6 +144,7 @@ private final class CaptureService {
     }
 
     func captureDisplayUnderPointer() {
+        guard !EditorSession.shared.isActive else { return }
         guard let displayID = displayUnderPointer() else { AppDelegate.shared?.showError(CaptureError.noDisplay); return }
         Task {
             do {
@@ -161,36 +162,6 @@ private final class CaptureService {
         }
     }
 
-    func captureRegion(display: CGDirectDisplayID, screen: NSScreen, selection: CGRect) {
-        let bounds = CGDisplayBounds(display)
-        let scaleX = bounds.width / screen.frame.width
-        let scaleY = bounds.height / screen.frame.height
-        let sourceRect = CGRect(
-            x: selection.minX,
-            y: screen.frame.height - selection.maxY,
-            width: selection.width,
-            height: selection.height
-        ).intersection(CGRect(origin: .zero, size: screen.frame.size))
-        guard sourceRect.width >= 1, sourceRect.height >= 1 else {
-            AppDelegate.shared?.showError(CaptureError.captureFailed)
-            return
-        }
-        Task {
-            do {
-                let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-                guard let scDisplay = content.displays.first(where: { $0.displayID == display }) else { throw CaptureError.noDisplay }
-                let filter = SCContentFilter(display: scDisplay, excludingApplications: [], exceptingWindows: [])
-                let configuration = SCStreamConfiguration()
-                configuration.sourceRect = sourceRect
-                configuration.width = max(1, Int((sourceRect.width * scaleX).rounded()))
-                configuration.height = max(1, Int((sourceRect.height * scaleY).rounded()))
-                configuration.showsCursor = false
-                configuration.capturesAudio = false
-                let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration)
-                deliver(image)
-            } catch { handleCaptureFailure(error) }
-        }
-    }
 
     private func handleCaptureFailure(_ error: Error) {
         if !CGPreflightScreenCaptureAccess() {
@@ -201,11 +172,11 @@ private final class CaptureService {
         }
     }
 
-    private func deliver(_ image: CGImage) {
+    func deliver(_ image: CGImage) {
         DispatchQueue.main.async { [self] in deliverOnMain(image) }
     }
 
-    private func deliverOnMain(_ image: CGImage) {
+    @discardableResult func deliverOnMain(_ image: CGImage) -> Bool {
         let prefs = Preferences.shared
         let mode = prefs.outputMode
         var copied = false
@@ -221,12 +192,12 @@ private final class CaptureService {
         if mode == .clipboardOnly {
             if copied { AppDelegate.shared?.captureDidCopy() }
             else { AppDelegate.shared?.showErrorMessage("The screenshot could not be copied to the clipboard.") }
-            return
+            return copied
         }
 
         let folder = prefs.saveFolder
         do { try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true) }
-        catch { AppDelegate.shared?.showError(error); return }
+        catch { AppDelegate.shared?.showError(error); return false }
 
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss.SSS"
@@ -234,12 +205,13 @@ private final class CaptureService {
         let url = folder.appendingPathComponent("Screenshot \(formatter.string(from: Date())).\(ext)")
         let type = ext == "jpg" ? UTType.jpeg : UTType.png
         guard let destination = CGImageDestinationCreateWithURL(url as CFURL, type.identifier as CFString, 1, nil) else {
-            AppDelegate.shared?.showError(CaptureError.saveFailed); return
+            AppDelegate.shared?.showError(CaptureError.saveFailed); return false
         }
         let properties: CFDictionary = ext == "jpg" ? [kCGImageDestinationLossyCompressionQuality: 0.94] as CFDictionary : [:] as CFDictionary
         CGImageDestinationAddImage(destination, image, properties)
-        guard CGImageDestinationFinalize(destination) else { AppDelegate.shared?.showError(CaptureError.saveFailed); return }
+        guard CGImageDestinationFinalize(destination) else { AppDelegate.shared?.showError(CaptureError.saveFailed); return false }
         AppDelegate.shared?.captureDidSave(url, copied: copied)
+        return true
     }
 }
 
@@ -380,7 +352,7 @@ private final class SettingsWindowController: NSWindowController, NSWindowDelega
 
         let shortcutGrid = NSGridView(views: [
             [NSTextField(labelWithString: "Display under pointer"), captureButton, NSButton(title: "Try", target: self, action: #selector(tryDisplayCapture))],
-            [NSTextField(labelWithString: "Select an area"), regionButton, NSButton(title: "Try", target: self, action: #selector(tryRegionCapture))]
+            [NSTextField(labelWithString: "Freeze & edit"), regionButton, NSButton(title: "Try", target: self, action: #selector(tryRegionCapture))]
         ])
         shortcutGrid.rowSpacing = 12
         shortcutGrid.columnSpacing = 20
@@ -416,7 +388,7 @@ private final class SettingsWindowController: NSWindowController, NSWindowDelega
         loginCheckbox.target = self
         loginCheckbox.action = #selector(loginChanged)
 
-        let note = NSTextField(wrappingLabelWithString: "The first shortcut captures immediately. The second opens the rectangle selector. Press Escape to cancel a selection.")
+        let note = NSTextField(wrappingLabelWithString: "The first shortcut captures immediately. The second freezes the screen for cropping and annotation; press it again to finish. Escape cancels.")
         note.textColor = .secondaryLabelColor
         note.font = .systemFont(ofSize: 12)
 
@@ -486,62 +458,6 @@ private final class SettingsWindowController: NSWindowController, NSWindowDelega
     }
 }
 
-private final class SelectionView: NSView {
-    var startPoint: CGPoint?
-    var selection = CGRect.zero
-    var onFinish: ((CGRect?) -> Void)?
-
-    override var acceptsFirstResponder: Bool { true }
-    override func resetCursorRects() { addCursorRect(bounds, cursor: .crosshair) }
-    override func mouseDown(with event: NSEvent) {
-        startPoint = convert(event.locationInWindow, from: nil)
-        selection = .zero
-        needsDisplay = true
-    }
-    override func mouseDragged(with event: NSEvent) {
-        guard let startPoint else { return }
-        let current = convert(event.locationInWindow, from: nil)
-        selection = CGRect(x: min(startPoint.x, current.x), y: min(startPoint.y, current.y), width: abs(current.x-startPoint.x), height: abs(current.y-startPoint.y))
-        needsDisplay = true
-    }
-    override func mouseUp(with event: NSEvent) {
-        onFinish?(selection.width >= 3 && selection.height >= 3 ? selection : nil)
-    }
-    override func keyDown(with event: NSEvent) {
-        if event.keyCode == 53 { onFinish?(nil) } else { super.keyDown(with: event) }
-    }
-    override func draw(_ dirtyRect: NSRect) {
-        NSColor.black.withAlphaComponent(0.30).setFill()
-        bounds.fill()
-        guard !selection.isEmpty else {
-            drawInstruction()
-            return
-        }
-        NSGraphicsContext.current?.saveGraphicsState()
-        NSGraphicsContext.current?.compositingOperation = .copy
-        NSColor.clear.setFill()
-        selection.fill()
-        NSGraphicsContext.current?.restoreGraphicsState()
-        NSColor.controlAccentColor.setStroke()
-        let outline = NSBezierPath(rect: selection.insetBy(dx: 0.5, dy: 0.5))
-        outline.lineWidth = 2
-        outline.stroke()
-        let size = "\(Int(selection.width)) × \(Int(selection.height))"
-        let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium), .foregroundColor: NSColor.white, .backgroundColor: NSColor.black.withAlphaComponent(0.72)]
-        size.draw(at: CGPoint(x: selection.minX, y: max(8, selection.minY - 24)), withAttributes: attrs)
-    }
-    private func drawInstruction() {
-        let text = "Drag to capture  •  Escape to cancel"
-        let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 17, weight: .semibold), .foregroundColor: NSColor.white]
-        let size = text.size(withAttributes: attrs)
-        text.draw(at: CGPoint(x: (bounds.width-size.width)/2, y: bounds.height-80), withAttributes: attrs)
-    }
-}
-
-private final class SelectionWindow: NSWindow {
-    override var canBecomeKey: Bool { true }
-    override var canBecomeMain: Bool { true }
-}
 
 private extension OutputMode {
     static let allCasesForMenu: [OutputMode] = [.both, .clipboardOnly, .fileOnly]
@@ -549,55 +465,8 @@ private extension OutputMode {
 
 private final class SelectionCoordinator {
     static let shared = SelectionCoordinator()
-    private var window: NSWindow?
-    private var display: CGDirectDisplayID?
-    private var screen: NSScreen?
-
-    func begin() {
-        guard let display = CaptureService.shared.displayUnderPointer() else {
-            AppDelegate.shared?.showError(CaptureError.noDisplay); return
-        }
-        let screen = NSScreen.screens.first { candidate in
-            guard let number = candidate.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { return false }
-            return CGDirectDisplayID(number.uint32Value) == display
-        } ?? NSScreen.main
-        guard let screen else { AppDelegate.shared?.showError(CaptureError.noDisplay); return }
-        self.screen = screen
-        self.display = display
-        let window = SelectionWindow(contentRect: NSRect(origin: .zero, size: screen.frame.size), styleMask: [.borderless], backing: .buffered, defer: false, screen: screen)
-        window.setFrame(screen.frame, display: true)
-        window.title = "Select an area"
-        window.level = .screenSaver
-        window.backgroundColor = .clear
-        window.isOpaque = false
-        window.hasShadow = false
-        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        let view = SelectionView(frame: window.contentView?.bounds ?? NSRect(origin: .zero, size: screen.frame.size))
-        view.setAccessibilityElement(true)
-        view.setAccessibilityLabel("Drag to select a screenshot area. Press Escape to cancel.")
-        view.onFinish = { [weak self] rect in self?.finish(rect) }
-        window.contentView = view
-        self.window = window
-        NSApp.activate(ignoringOtherApps: true)
-        window.orderFrontRegardless()
-        window.makeKey()
-        window.makeFirstResponder(view)
-    }
-
-    private func finish(_ rect: CGRect?) {
-        let capturedDisplay = display
-        let capturedScreen = screen
-        window?.orderOut(nil)
-        window = nil
-        display = nil
-        screen = nil
-        guard let rect, let capturedDisplay, let capturedScreen else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
-            CaptureService.shared.captureRegion(display: capturedDisplay, screen: capturedScreen, selection: rect)
-        }
-    }
+    func begin() { EditorSession.shared.toggle() }
 }
-
 private final class ToastPanel: NSPanel {
     init(message: String, screen: NSScreen?) {
         super.init(contentRect: NSRect(x: 0, y: 0, width: 330, height: 58), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
@@ -627,7 +496,7 @@ private final class ToastPanel: NSPanel {
     }
 }
 
-private final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate {
     static var shared: AppDelegate?
     private var statusItem: NSStatusItem!
     private var settings: SettingsWindowController!
@@ -664,6 +533,19 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         appMenu.addItem(quitItem)
         appMenuItem.submenu = appMenu
         mainMenu.addItem(appMenuItem)
+        let editMenuItem = NSMenuItem()
+        let editMenu = NSMenu(title: "Edit")
+        editMenu.addItem(NSMenuItem(title: "Undo", action: Selector(("undo:")), keyEquivalent: "z"))
+        let redo = NSMenuItem(title: "Redo", action: Selector(("redo:")), keyEquivalent: "z")
+        redo.keyEquivalentModifierMask = [.command, .shift]
+        editMenu.addItem(redo)
+        editMenu.addItem(.separator())
+        editMenu.addItem(NSMenuItem(title: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x"))
+        editMenu.addItem(NSMenuItem(title: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c"))
+        editMenu.addItem(NSMenuItem(title: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v"))
+        editMenu.addItem(NSMenuItem(title: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a"))
+        editMenuItem.submenu = editMenu
+        mainMenu.addItem(editMenuItem)
         NSApp.mainMenu = mainMenu
     }
 
@@ -672,7 +554,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         let menu = NSMenu()
         let capture = NSMenuItem(title: "Capture Display Under Pointer", action: #selector(captureDisplay), keyEquivalent: "")
         capture.toolTip = Preferences.shared.captureShortcut.readable
-        let region = NSMenuItem(title: "Capture Selected Area", action: #selector(captureRegion), keyEquivalent: "")
+        let region = NSMenuItem(title: "Freeze Screen & Edit", action: #selector(captureRegion), keyEquivalent: "")
         region.toolTip = Preferences.shared.regionShortcut.readable
         menu.addItem(capture)
         menu.addItem(region)

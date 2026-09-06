@@ -1,5 +1,7 @@
 # ShotKey
 
+The experimental 1.3 editor is documented in [Frozen screenshot editor](docs/EDITOR.md). The `checkpoint/v1.2.0` branch preserves the original release.
+
 <p align="center">
   <img src="docs/images/shotkey-icon.png" width="128" alt="ShotKey app icon">
 </p>
