@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.5.1 — Clean captures and explicit restore
+
+- Freeze & edit always starts from a fresh capture, even when an earlier edit is preserved.
+- Added a Restore Last Edit icon to the editor toolbar; the existing menu commands remain available.
+- Enter now finishes text editing, while Shift–Enter inserts a new line.
+
 ## 1.5 — Universal picker/OCR and safer editing
 
 - Added configurable global color-picker and OCR shortcuts. They capture the display under the pointer without opening the full editor; the existing I and O editor tools remain.

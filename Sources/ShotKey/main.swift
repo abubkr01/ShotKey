@@ -668,7 +668,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func captureRegion() { SelectionCoordinator.shared.begin() }
     @objc private func editClipboard() { EditorSession.shared.openClipboard() }
     @objc private func openLastEdit() { EditorSession.shared.resumeLastEdit() }
-    @objc private func discardLastEdit() { EditorSession.shared.cancel() }
+    @objc private func discardLastEdit() { EditorSession.shared.discardLastEdit() }
     @objc private func pickColor() { GlobalUtilitySession.shared.begin(.picker) }
     @objc private func copyScreenText() { GlobalUtilitySession.shared.begin(.ocr) }
     @objc private func showSettings() { settings.show() }

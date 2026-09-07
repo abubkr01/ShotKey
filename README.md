@@ -1,6 +1,6 @@
 # ShotKey
 
-The 1.5 editor is documented in [Frozen screenshot editor](docs/EDITOR.md). The `checkpoint/v1.2.0` branch preserves the original release.
+The 1.5.1 editor is documented in [Frozen screenshot editor](docs/EDITOR.md). The `checkpoint/v1.2.0` branch preserves the original release.
 
 <p align="center">
   <img src="docs/images/shotkey-icon.png" width="128" alt="ShotKey app icon">
@@ -36,9 +36,9 @@ Then I kept reaching for a few more things: an arrow, a quick crop, a color from
 
 ## Install
 
-ShotKey 1.2 currently provides an Apple silicon build for macOS 14 or newer.
+ShotKey 1.5.1 currently provides an Apple silicon build for macOS 14 or newer.
 
-1. Download [ShotKey 1.2](outputs/ShotKey-1.2.dmg).
+1. Download [ShotKey 1.5.1](outputs/ShotKey-1.5.1.dmg).
 2. Open the DMG and drag ShotKey into **Applications**.
 3. Open ShotKey and allow **Screen & System Audio Recording** when macOS asks.
 4. Use **Quit & Reopen** if macOS shows that button.

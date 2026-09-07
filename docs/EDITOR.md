@@ -1,4 +1,4 @@
-# Frozen screenshot and clipboard editor (1.5)
+# Frozen screenshot and clipboard editor (1.5.1)
 
 Press your **Freeze & edit** shortcut to capture the connected displays and open an editor over the display under the pointer. The picture stays still while videos and apps keep running underneath. Captures are taken when the shortcut runs; connected displays are requested concurrently, rather than waiting until you move to them.
 
@@ -30,7 +30,7 @@ Pressing Option–1 again while the editor is visible does nothing. It cannot ex
 | L | Line |
 | R | Rectangle |
 | E | Ellipse; hold Shift for a circle |
-| T | Text; click to type, Enter adds a line, Control–Enter commits |
+| T | Text; click to type, Enter finishes editing, Shift–Enter adds a line |
 | B | Rectangular blur |
 | I | Pixel color picker; click to copy six-digit hex without a hash |
 | O | Drag a region to copy recognized text with line breaks |
@@ -56,11 +56,11 @@ Selecting an existing annotation displays its saved style. Changing an option up
 
 ## Displays and shortcuts
 
-Only one editor session can exist. Further shortcut presses during initial capture are ignored. Option–1 does nothing while the editor is visible. After Escape hides it, Option–1 restores that preserved edit rather than silently replacing it.
+Only one editor session is visible at a time. Further shortcut presses during initial capture are ignored, and Option–1 does nothing while the editor is visible. After Escape hides and preserves an edit, Option–1 always takes a fresh capture. The preserved edit is restored only when you explicitly choose the toolbar restore icon or **Open Last Edit** from ShotKey's menu.
 
 Move the pointer onto another display to switch to its frozen image. Edits on each screen are retained if you switch back. During a drag, pending crop, text entry, or color selection, switching pauses so the editor does not disappear while you work. Export uses the currently active display's document.
 
-Escape hides the editor in one press without throwing the edit away. Choose **Open Last Edit** in ShotKey's menu to restore it, or **Discard Last Edit** to remove it without exporting. Preservation lasts while ShotKey remains running; quitting the app clears it. Exporting clears the preserved edit. The full-display shortcut remains blocked while a visible or preserved edit exists.
+Escape hides the editor in one press without throwing the edit away. Click the circular restore icon in the top toolbar or choose **Open Last Edit** in ShotKey's menu to restore it. **Discard Last Edit** removes it without exporting. Preservation lasts while ShotKey remains running; quitting the app clears it. Starting or exporting a fresh edit does not silently overwrite the preserved one; hiding another edit replaces the older preserved edit.
 
 ## Verification and boundaries
 
@@ -101,7 +101,7 @@ Press O and drag around text, or choose **Copy all visible text (OCR)** in the e
 
 OCR is best-effort: language, resolution, fonts, columns and unusual layouts can affect accuracy and reading order. Review important text. Exporting an image later replaces clipboard text if the output mode includes copying the image.
 
-## 1.5 verification
+## 1.5.1 verification
 
 The regression runner additionally checks independent clipboard output modes, original import pixel dimensions, suspend/resume, prevention of Option–1 export, explicit export, immediate quick selection, crop expansion, six-digit hex parsing, Retina color coordinates and actual two-line Vision recognition. Tests use a private temporary pasteboard and do not replace the user's clipboard. Native shortcut and toolbar checks are performed separately.
 

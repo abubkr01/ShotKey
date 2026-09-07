@@ -192,13 +192,24 @@ final class EditorWindow: NSWindow {
 /// There is one session, including during asynchronous snapshot acquisition.
 final class EditorSession: NSObject, NSWindowDelegate {
     static let shared = EditorSession()
-    enum Phase { case idle, loading, editing, suspended, finishing }
+    enum Phase { case idle, loading, editing, finishing }
+    private struct SavedEdit {
+        let window: EditorWindow
+        let canvas: EditorCanvas
+        let toolbar: EditorToolbar
+        let documents: [CGDirectDisplayID: EditorDocument]
+        let screens: [CGDirectDisplayID: NSScreen]
+        let activeID: CGDirectDisplayID?
+        let clipboardSession: Bool
+        let quickSelectionActive: Bool
+    }
     private(set) var phase: Phase = .idle
     var isActive: Bool { phase != .idle }
     private var clipboardSession = false
     private var ocrRequest = UUID()
     private var quickSelectionActive = false
-    var hasLastEdit: Bool { phase == .suspended }
+    private var lastEdit: SavedEdit?
+    var hasLastEdit: Bool { lastEdit != nil }
     var outputMode: OutputMode {
         get { clipboardSession ? Preferences.shared.clipboardOutputMode : Preferences.shared.outputMode }
         set {
@@ -212,11 +223,8 @@ final class EditorSession: NSObject, NSWindowDelegate {
     func windowShouldClose(_ sender: NSWindow) -> Bool { requestCancel(); return false }
     func openClipboard(pasteboard: NSPasteboard = .general) {
         guard !isActive else {
-            if phase == .suspended { resumeLastEdit() }
-            else {
-                window?.makeKeyAndOrderFront(nil)
-                canvas?.showMessage("Finish or hide the current edit before opening another image")
-            }
+            window?.makeKeyAndOrderFront(nil)
+            canvas?.showMessage("Finish or hide the current edit before opening another image")
             return
         }
         guard let image = NSImage(pasteboard: pasteboard),
@@ -339,7 +347,6 @@ final class EditorSession: NSObject, NSWindowDelegate {
         switch phase {
         case .loading, .finishing: return
         case .editing: return
-        case .suspended: resumeLastEdit()
         case .idle: begin()
         }
     }
@@ -441,26 +448,45 @@ final class EditorSession: NSObject, NSWindowDelegate {
         else { phase = .editing }
     }
     func suspend() {
-        guard phase == .editing else { return }
-        canvas?.commitText()
+        guard phase == .editing, let window, let canvas, let toolbar else { return }
+        canvas.commitText()
         timer?.invalidate(); timer = nil
         if let monitor { NSEvent.removeMonitor(monitor) }; monitor = nil
         NotificationCenter.default.removeObserver(self)
         NSColorPanel.shared.orderOut(nil)
-        toolbar?.orderOut()
-        window?.orderOut(nil)
-        phase = .suspended
+        toolbar.orderOut()
+        window.orderOut(nil)
+        destroySavedEdit()
+        lastEdit = SavedEdit(window: window, canvas: canvas, toolbar: toolbar,
+                             documents: documents, screens: screens, activeID: activeID,
+                             clipboardSession: clipboardSession, quickSelectionActive: quickSelectionActive)
+        self.window = nil; self.canvas = nil; self.toolbar = nil
+        documents.removeAll(); screens.removeAll(); activeID = nil
+        phase = .idle; clipboardSession = false; quickSelectionActive = false
         AppDelegate.shared?.refreshMenu()
     }
     func resumeLastEdit() {
-        guard phase == .suspended, let window, let canvas else { return }
+        guard let saved = lastEdit else { return }
+        destroyActiveEdit()
+        lastEdit = nil
+        window = saved.window; canvas = saved.canvas; toolbar = saved.toolbar
+        documents = saved.documents; screens = saved.screens; activeID = saved.activeID
+        clipboardSession = saved.clipboardSession; quickSelectionActive = saved.quickSelectionActive
         phase = .editing
         installMonitor()
-        if !clipboardSession { startTracking() }
+        if !clipboardSession {
+            startTracking()
+            NotificationCenter.default.addObserver(self, selector: #selector(cancel),
+                name: NSApplication.didChangeScreenParametersNotification, object: nil)
+        }
         NSApp.activate(ignoringOtherApps: true)
-        window.makeKeyAndOrderFront(nil)
-        if let screen = window.screen { toolbar?.show(screen: screen, parent: window) }
-        window.makeFirstResponder(canvas)
+        saved.window.makeKeyAndOrderFront(nil)
+        if let screen = saved.window.screen { saved.toolbar.show(screen: screen, parent: saved.window) }
+        saved.window.makeFirstResponder(saved.canvas)
+        AppDelegate.shared?.refreshMenu()
+    }
+    func discardLastEdit() {
+        destroySavedEdit()
         AppDelegate.shared?.refreshMenu()
     }
     func activateUtility(_ tool: EditorTool) -> Bool {
@@ -470,6 +496,10 @@ final class EditorSession: NSObject, NSWindowDelegate {
         return true
     }
     @objc func cancel() {
+        destroyActiveEdit()
+        AppDelegate.shared?.refreshMenu()
+    }
+    private func destroyActiveEdit() {
         generation = UUID()
         timer?.invalidate(); timer = nil
         if let monitor { NSEvent.removeMonitor(monitor) }; monitor = nil
@@ -480,7 +510,13 @@ final class EditorSession: NSObject, NSWindowDelegate {
         window?.close(); window = nil; canvas = nil
         documents.removeAll(); screens.removeAll(); activeID = nil
         phase = .idle; clipboardSession = false; quickSelectionActive = false
-        AppDelegate.shared?.refreshMenu()
+    }
+    private func destroySavedEdit() {
+        guard let saved = lastEdit else { return }
+        saved.toolbar.close()
+        saved.window.delegate = nil
+        saved.window.close()
+        lastEdit = nil
     }
     private func handleKey(_ event: NSEvent) -> Bool {
         guard let canvas else { return false }
@@ -810,9 +846,10 @@ final class EditorCanvas: NSView, NSTextViewDelegate {
         changed()
     }
     func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
-        if commandSelector == #selector(NSResponder.insertNewline(_:)),
-           NSApp.currentEvent?.modifierFlags.contains(.control) == true {
-            commitText(); return true
+        if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+            if NSApp.currentEvent?.modifierFlags.contains(.shift) == true { return false }
+            commitText()
+            return true
         }
         return false
     }
@@ -1073,6 +1110,7 @@ final class EditorToolbar: NSObject, NSTextFieldDelegate {
     private let blur = NSTextField(string: "14")
     private let mode = NSPopUpButton()
     private let background = NSButton(checkboxWithTitle: "BG", target: nil, action: nil)
+    private let restore = NSButton()
     private var options: [NSView] = []
     init(canvas: EditorCanvas, session: EditorSession) {
         self.canvas = canvas; self.session = session
@@ -1124,13 +1162,20 @@ final class EditorToolbar: NSObject, NSTextFieldDelegate {
                             target: self, action: #selector(finish))
         save.translatesAutoresizingMaskIntoConstraints = false; save.bezelStyle = .rounded
         save.toolTip = "Export image (Command–Enter)"
+        restore.image = NSImage(systemSymbolName: "arrow.uturn.backward.circle", accessibilityDescription: "Restore last edit")
+        restore.target = self; restore.action = #selector(restoreLastEdit)
+        restore.translatesAutoresizingMaskIntoConstraints = false; restore.bezelStyle = .rounded
+        restore.toolTip = "Restore last preserved edit"
         let root = panel.contentView!
-        root.addSubview(scroll); root.addSubview(save); root.addSubview(more)
+        root.addSubview(scroll); root.addSubview(restore); root.addSubview(save); root.addSubview(more)
         NSLayoutConstraint.activate([
             scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 6),
             scroll.topAnchor.constraint(equalTo: root.topAnchor, constant: 4),
             scroll.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -4),
-            scroll.trailingAnchor.constraint(equalTo: save.leadingAnchor, constant: -3),
+            scroll.trailingAnchor.constraint(equalTo: restore.leadingAnchor, constant: -3),
+            restore.widthAnchor.constraint(equalToConstant: 32),
+            restore.centerYAnchor.constraint(equalTo: root.centerYAnchor),
+            restore.trailingAnchor.constraint(equalTo: save.leadingAnchor, constant: -3),
             save.widthAnchor.constraint(equalToConstant: 32),
             save.centerYAnchor.constraint(equalTo: root.centerYAnchor),
             save.trailingAnchor.constraint(equalTo: more.leadingAnchor, constant: -3),
@@ -1158,6 +1203,7 @@ final class EditorToolbar: NSObject, NSTextFieldDelegate {
     func toggleVisible() { if panel.isVisible { panel.orderOut(nil) } else { panel.orderFrontRegardless() } }
     func refresh() {
         guard let canvas else { return }
+        restore.isEnabled = session?.hasLastEdit == true
         let s = canvas.style, tool = canvas.selectedTool
         for (i, button) in buttons.enumerated() { button.state = EditorTool.allCases[i] == canvas.tool ? .on : .off }
         color.color = s.color.ns; fill.color = s.fill.ns
@@ -1180,7 +1226,7 @@ final class EditorToolbar: NSObject, NSTextFieldDelegate {
         row.layoutSubtreeIfNeeded()
         if let parent = panel.parent {
             let maxWidth = max(300, min(parent.frame.width - 20, parent.screen?.visibleFrame.width ?? 900))
-            let target = min(maxWidth, row.fittingSize.width + 91)
+            let target = min(maxWidth, row.fittingSize.width + 126)
             panel.setFrame(CGRect(x: parent.frame.midX - target / 2, y: panel.frame.minY, width: target, height: 44), display: true)
         }
     }
@@ -1208,6 +1254,7 @@ final class EditorToolbar: NSObject, NSTextFieldDelegate {
         return menu
     }
     @objc private func showMenu(_ sender: NSButton) { actionMenu().popUp(positioning: nil, at: CGPoint(x: 0, y: sender.bounds.minY), in: sender) }
+    @objc private func restoreLastEdit() { session?.resumeLastEdit() }
     @objc private func setOutput(_ sender: NSMenuItem) {
         session?.outputMode = [OutputMode.both, .clipboardOnly, .fileOnly][sender.tag]
         canvas?.showMessage("Output: " + (session?.outputMode.title ?? ""))
