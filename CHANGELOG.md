@@ -12,6 +12,7 @@
 - Enter adds a text newline; Control–Enter commits text. Removed text outlines, retaining background color.
 - Confirmed crop exclusions are much darker. Shading, lens and status messages never appear in exported images.
 - Regression checks for clipboard output independence, double-Escape, Retina pixel coordinates, hex validation and real multiline OCR.
+- Added automatic use of a stable private local signing identity on the development Mac, preventing every rebuild from receiving a new hash-based TCC identity.
 
 ## 1.3 — Frozen editor
 

@@ -15,6 +15,12 @@ The difficult ShotKey permission bug was mainly number 3. The app was ad-hoc sig
 
 Apple has confirmed this behavior: ad-hoc signed code cannot maintain a stable identity across versions. Use an **Apple Development** certificate for development builds and **Developer ID Application** plus notarization for direct distribution.
 
+### ShotKey's local-development solution
+
+On AbuBakar's Mac, ShotKey is now signed with a private self-signed certificate named **ShotKey Local Development**, stored in the login keychain and trusted only on that Mac. Apple documents self-signed certificates as useful for validating the designated requirement of locally signed code. This is suitable for a private development installation: the certificate stays constant, so the requirement no longer becomes a new code-directory hash after every build.
+
+This is not a public-distribution identity. A release for other people should still use **Developer ID Application** and Apple notarization. Never export or commit the local private key. The build script automatically selects the local identity when it exists, otherwise it prints the existing ad-hoc warning.
+
 ## 1. Add the required usage description
 
 Every target that captures the screen needs this key in its built app's `Info.plist`:

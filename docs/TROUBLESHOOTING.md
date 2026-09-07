@@ -21,6 +21,10 @@ tccutil reset ScreenCapture com.abubakar.shotkey
 
 Then open `/Applications/ShotKey.app` and grant access again.
 
+After resetting, keep that installed build unchanged until approval and a real capture test succeed. Do not rebuild or re-sign it in between. macOS requires the person using the Mac to approve Screen Recording; the reset command cannot grant it.
+
+For future development builds, the build script first looks for the private **ShotKey Local Development** identity in AbuBakar's login keychain. It also accepts `SHOTKEY_SIGNING_IDENTITY` with the name of an installed Apple Development certificate. Without either identity it uses ad-hoc signing and prints a warning. Switching to ScreenCaptureKit alone does not make ad-hoc identities stable.
+
 The bundle identifier must match exactly, including capitalization. Developers can use the reusable [macOS Screen Capture Development Guide](MACOS_SCREEN_CAPTURE_GUIDE.md) for signing diagnostics, ScreenCaptureKit implementation notes, and multi-display testing.
 
 ## The shortcut does nothing

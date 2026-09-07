@@ -14,7 +14,7 @@ ShotKey is a native Swift/AppKit menu-bar application. It uses ScreenCaptureKit 
 ./build-app.sh
 ```
 
-The script builds the release executable, generates the icon, creates the `.app` bundle, and applies an ad-hoc signature. The result is `outputs/ShotKey.app`.
+The script builds the release executable, generates the icon, creates the `.app` bundle, and signs it. On AbuBakar's development Mac it automatically uses the private **ShotKey Local Development** identity stored in the login keychain. Other Macs fall back to ad-hoc signing unless `SHOTKEY_SIGNING_IDENTITY` is set. The result is `outputs/ShotKey.app`.
 
 ## Package
 
@@ -26,7 +26,7 @@ This rebuilds the app and creates `outputs/ShotKey-1.2.dmg` with an Applications
 
 ## Permission behavior during development
 
-The local build is ad-hoc signed. A rebuild can receive a different code identity, especially on newer macOS releases. If Screen Recording permission appears enabled but a new build cannot capture, remove the stale privacy entry and grant permission to the newly built copy. See [Troubleshooting](TROUBLESHOOTING.md).
+The stable local identity keeps ShotKey's designated requirement consistent across rebuilds on this Mac, so Screen Recording permission can remain attached to the app. Its private key must stay in the login keychain and must never be committed or distributed. A build made elsewhere without that identity falls back to ad-hoc signing and may need fresh approval. See [Troubleshooting](TROUBLESHOOTING.md).
 
 For stable distribution, use an Apple Developer ID certificate and notarize the application. That gives future builds a stable identity and avoids Gatekeeper warnings.
 
