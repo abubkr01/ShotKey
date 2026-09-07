@@ -25,6 +25,8 @@ After resetting, keep that installed build unchanged until approval and a real c
 
 For future development builds, the build script first looks for the private **ShotKey Local Development** identity in AbuBakar's login keychain. It also accepts `SHOTKEY_SIGNING_IDENTITY` with the name of an installed Apple Development certificate. Without either identity it uses ad-hoc signing and prints a warning. Switching to ScreenCaptureKit alone does not make ad-hoc identities stable.
 
+ShotKey also treats individual display failures separately. A disconnected, virtual, or temporarily unavailable display is skipped instead of aborting successful captures from every other display. Therefore, a display-specific ScreenCaptureKit error should no longer be presented as a blanket permission problem.
+
 The bundle identifier must match exactly, including capitalization. Developers can use the reusable [macOS Screen Capture Development Guide](MACOS_SCREEN_CAPTURE_GUIDE.md) for signing diagnostics, ScreenCaptureKit implementation notes, and multi-display testing.
 
 ## The shortcut does nothing

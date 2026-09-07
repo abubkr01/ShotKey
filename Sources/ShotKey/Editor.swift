@@ -311,7 +311,7 @@ final class EditorSession: NSObject, NSWindowDelegate {
 
     static func captureSnapshots(_ candidates: [(CGDirectDisplayID, NSScreen)]) async throws -> [CGDirectDisplayID: CGImage] {
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-        return try await withThrowingTaskGroup(of: (CGDirectDisplayID, CGImage).self) { group in
+        return await withTaskGroup(of: (CGDirectDisplayID, CGImage?).self) { group in
             for (id, _) in candidates {
                 guard let display = content.displays.first(where: { $0.displayID == id }) else { continue }
                 group.addTask {
@@ -320,11 +320,13 @@ final class EditorSession: NSObject, NSWindowDelegate {
                     config.width = CGDisplayPixelsWide(id)
                     config.height = CGDisplayPixelsHigh(id)
                     config.showsCursor = false; config.capturesAudio = false
-                    return (id, try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config))
+                    return (id, try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config))
                 }
             }
             var results: [CGDirectDisplayID: CGImage] = [:]
-            for try await (id, image) in group { results[id] = image }
+            for await (id, image) in group {
+                if let image { results[id] = image }
+            }
             return results
         }
     }
