@@ -1,17 +1,25 @@
-# Frozen screenshot and clipboard editor (1.4)
+# Frozen screenshot and clipboard editor (1.5)
 
 Press your **Freeze & edit** shortcut to capture the connected displays and open an editor over the display under the pointer. The picture stays still while videos and apps keep running underneath. Captures are taken when the shortcut runs; connected displays are requested concurrently, rather than waiting until you move to them.
 
 The shortcut is configurable. With AbuBakar's current settings, **Option–1** opens the editor and **Option–2** takes an immediate full-display screenshot.
 
-## Quick workflow
+## Two Freeze & edit workflows
+
+For a quick rectangular screenshot:
 
 1. Press Option–1.
-2. Press A and drag an arrow, or choose another tool.
-3. Press C and drag the final crop. Press Enter.
-4. Press Option–1 again, or press Command–S.
+2. Drag the rectangle.
+3. Release. ShotKey exports immediately and closes, using the separate **Quick selection** output setting.
 
-Export uses the output behavior selected in ShotKey Settings: save and copy, clipboard only, or file only. The editor and its toolbar are never part of the exported image.
+For annotation:
+
+1. Press Option–1.
+2. Before dragging, choose a tool such as A, R, T, B, C, I, or O. This disables instant export.
+3. Annotate and optionally crop. Enter only confirms a pending crop.
+4. Press Command–Enter or click the save icon.
+
+Pressing Option–1 again while the editor is visible does nothing. It cannot export accidentally. Edited images use **After capture**; clipboard-image edits use the independent **Clipboard edits** setting. The toolbar, picker lens, crop shading, and messages are never part of the exported image.
 
 ## Tools and keys
 
@@ -33,12 +41,12 @@ Export uses the output behavior selected in ShotKey Settings: save and copy, cli
 | Delete | Delete selected annotation |
 | Arrow keys | Move selection; Shift moves in larger steps |
 | Tab | Hide/show the movable toolbar |
-| Command–S | Finish with your configured output behavior |
-| Escape | First press warns; press again within three seconds to discard and close |
+| Command–Enter | Export with the configured output behavior |
+| Escape | Hide and preserve the editor; restore it from Open Last Edit |
 
 Hold Shift while drawing a line or arrow to snap it to 45-degree increments. Hold Shift for a square rectangle. Use V and double-click a text annotation to edit it again.
 
-The editor starts in Crop mode for quick area screenshots. Releasing a crop drag leaves a preview so you can adjust it before committing. Drag inside the preview to move it, or drag a corner to resize. Cropping is reversible through undo. Annotation history has no fixed step limit and stores shape data rather than a full screenshot for every step.
+The editor starts in a special quick-selection crop mode. Releasing the first drag immediately exports. Choosing any editor tool—including C—switches to normal editing. In normal Crop mode, releasing a drag leaves an adjustable preview; Enter confirms it without exporting. Drag inside to move it or drag a corner to resize. A confirmed crop can be replaced by a larger or smaller crop without undoing first. Cropping remains reversible through Command–Z.
 
 ## Remembered options
 
@@ -48,11 +56,11 @@ Selecting an existing annotation displays its saved style. Changing an option up
 
 ## Displays and shortcuts
 
-Only one editor session can exist. Further shortcut presses during initial capture are ignored. Once the editor is ready, the same shortcut finishes it. A press during an active mouse drag is ignored until the drag ends.
+Only one editor session can exist. Further shortcut presses during initial capture are ignored. Option–1 does nothing while the editor is visible. After Escape hides it, Option–1 restores that preserved edit rather than silently replacing it.
 
 Move the pointer onto another display to switch to its frozen image. Edits on each screen are retained if you switch back. During a drag, pending crop, text entry, or color selection, switching pauses so the editor does not disappear while you work. Export uses the currently active display's document.
 
-The full-display shortcut is ignored while an editor is open to prevent accidentally capturing the editor itself. Closing or exporting restores normal full-display capture.
+Escape hides the editor in one press without throwing the edit away. Choose **Open Last Edit** in ShotKey's menu to restore it, or **Discard Last Edit** to remove it without exporting. Preservation lasts while ShotKey remains running; quitting the app clears it. Exporting clears the preserved edit. The full-display shortcut remains blocked while a visible or preserved edit exists.
 
 ## Verification and boundaries
 
@@ -68,7 +76,7 @@ Interaction references: [ShareX's editor documentation](https://getsharex.com/do
 
 The **Edit clipboard image** shortcut defaults to **Option–3** and is configurable in Settings. It reads the image currently on the system clipboard, not a clipboard-history database. It opens in a separate resizable window at its original pixel resolution, with the initial view scaled to fit. Scroll to pan; use the trackpad magnification gesture to zoom. This workflow does not need Screen Recording permission.
 
-**Clipboard edits** in Settings is independent of **After capture** and defaults to **Copy to Clipboard Only**. Change it there or in the editor's ellipsis menu. Command–S exports. Only one edit session can be active: opening another clipboard image brings the current edit forward instead of replacing unsaved work.
+**Clipboard edits** in Settings is independent of **After capture** and defaults to **Copy to Clipboard Only**. Change it there or in the editor's ellipsis menu. Command–Enter or the save icon exports. Only one edit session can be active: opening another clipboard image brings the current edit forward instead of replacing unsaved work.
 
 ## Compact toolbar and colors
 
@@ -76,14 +84,25 @@ The single-row toolbar shows contextual options for the active tool. On a smalle
 
 Color fields accept six hexadecimal digits without a hash, for example `5785D1`. Press I and move over the frozen image. The lens shows individual source-image pixels, including on Retina displays. Click to copy uppercase hex and apply it to the previous tool's foreground color. Option-click applies fill/background instead. Picking samples the rendered image including annotations, but excludes toolbar, lens and crop shading. Colors are interpreted in sRGB; the six digits describe RGB, not transparency.
 
+## Universal screen utilities
+
+The picker and OCR also work without opening Freeze & edit:
+
+- **Command–Shift–C** starts the global color picker by default.
+- **Control–Command–Shift–C** starts global OCR selection by default.
+
+Both shortcuts are configurable in Settings. Each captures only the display under the pointer at the moment the shortcut is pressed. The color lens appears immediately near the pointer; click a pixel to copy its uppercase six-digit RGB value without a hash. A fading confirmation shows both the color swatch and code. Escape cancels without changing the clipboard.
+
+Global OCR freezes the display, lets you drag around text, then closes the overlay and recognizes locally. Success produces a fading copied confirmation. Escape cancels. If the full editor is already visible, either global shortcut selects the corresponding I or O editor tool instead of stacking another overlay.
+
 ## Text recognition
 
 Press O and drag around text, or choose **Copy all visible text (OCR)** in the ellipsis menu to read the current crop. Recognition runs locally using Apple's [Vision framework](https://developer.apple.com/documentation/vision/vnrecognizetextrequest). Detected lines remain separate rather than being flattened into one paragraph. No text found or a recognition failure leaves the clipboard unchanged.
 
 OCR is best-effort: language, resolution, fonts, columns and unusual layouts can affect accuracy and reading order. Review important text. Exporting an image later replaces clipboard text if the output mode includes copying the image.
 
-## 1.4 verification
+## 1.5 verification
 
-The regression runner additionally checks independent clipboard output modes, original import pixel dimensions, double-Escape, six-digit hex parsing, Retina color coordinates and boundary clamping, and actual two-line Vision recognition. Tests use a private temporary pasteboard and do not replace the user's clipboard. The native single-row toolbar was visually checked separately.
+The regression runner additionally checks independent clipboard output modes, original import pixel dimensions, suspend/resume, prevention of Option–1 export, explicit export, immediate quick selection, crop expansion, six-digit hex parsing, Retina color coordinates and actual two-line Vision recognition. Tests use a private temporary pasteboard and do not replace the user's clipboard. Native shortcut and toolbar checks are performed separately.
 
-On the installed 1.4 build launched normally from Applications, Option–3 opened the system clipboard image in its own window; the first Escape kept it open and the second closed it. The screenshot hotkey was also invoked, but a complete post-update screen capture was not verified. Ad-hoc signing still means macOS may require fresh approval; installing this release does not bypass or reset system permissions.
+The installed app uses the stable **ShotKey Local Development** identity documented in the permission guide. That identity prevents ordinary local rebuilds from turning into new hash-based apps in macOS privacy settings.

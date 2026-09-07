@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.5 — Universal picker/OCR and safer editing
+
+- Added configurable global color-picker and OCR shortcuts. They capture the display under the pointer without opening the full editor; the existing I and O editor tools remain.
+- The global color picker opens directly under the pointer with an exact-pixel lens, copies six-digit hex, and confirms with a fading color swatch.
+- Global OCR lets the user drag around screen text, runs locally, retains detected line breaks, and confirms when copied.
+- Option–1 can no longer export an open editor. Keyboard export is Command–Enter only; a fixed save icon provides the mouse alternative.
+- Restored instant rectangular capture as the initial Freeze & edit behavior. Its remembered output setting is independent from full-display and edited-image output.
+- Escape now hides the editor once while preserving its complete in-memory state; **Open Last Edit** restores it while ShotKey remains running.
+- Enter confirms a pending crop but never exports. A confirmed crop can be replaced by a larger selection without first undoing it.
+
 ## 1.4 — Clipboard editing, pixel colors, and text extraction
 
 - Configurable Edit Clipboard Image shortcut (Option–3 by default) and a separate resizable editor.

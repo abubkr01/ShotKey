@@ -16,6 +16,7 @@ class Preferences {
     let regionShortcut = TestShortcut()
     var outputMode = OutputMode.both
     var clipboardOutputMode = OutputMode.clipboardOnly
+    var quickSelectionOutputMode = OutputMode.both
 }
 class CaptureService {
     static let shared = CaptureService()
@@ -27,6 +28,9 @@ class AppDelegate {
     static var shared: AppDelegate? = AppDelegate()
     func showError(_ error: Error) { print("Capture error: \(error)") }
     func showErrorMessage(_ message: String) { print(message) }
+    func refreshMenu() {}
+    func showColorCopied(_ hex: String, color: NSColor, screen: NSScreen?) {}
+    func showUtilityMessage(_ message: String, screen: NSScreen?) {}
 }
 
 let app = NSApplication.shared
@@ -62,6 +66,9 @@ pump(0.2)
 XCTAssertEqual(captures, 1)
 XCTAssertTrue(session.phase == .editing)
 session.toggle()
+XCTAssertTrue(session.phase == .editing)
+XCTAssertEqual(CaptureService.shared.results.count, 0)
+session.finish()
 XCTAssertTrue(session.phase == .idle)
 XCTAssertEqual(CaptureService.shared.results.count, 1)
 session.toggle()
@@ -69,7 +76,7 @@ session.cancel()
 pump(0.2)
 XCTAssertTrue(session.phase == .idle)
 XCTAssertEqual(CaptureService.shared.results.count, 1)
-print("PASS repeated hotkey during loading, second press finishes once, cancelled capture cannot reopen")
+print("PASS repeated hotkey cannot export, explicit finish exports once, cancelled capture cannot reopen")
 
 let d = EditorDocument(image: tests.fixture(width: 1100, height: 700), size: CGSize(width: 1100, height: 700))
 var state = d.state
@@ -122,6 +129,13 @@ interactionCanvas.applyCrop()
 XCTAssertEqual(interactionDocument.render(cropped: true)!.width, 200)
 interactionCanvas.history(redo: false)
 XCTAssertTrue(interactionDocument.state.crop == nil)
+interactionCanvas.choose(.crop)
+drag(100, 50, 500, 350)
+XCTAssertEqual(interactionCanvas.pendingCrop, CGRect(x: 100, y: 50, width: 400, height: 300))
+interactionCanvas.applyCrop()
+XCTAssertEqual(interactionDocument.render(cropped: true)!.width, 400)
+interactionCanvas.history(redo: false)
+XCTAssertTrue(interactionDocument.state.crop == nil)
 interactionCanvas.choose(.ellipse)
 drag(400, 50, 500, 110, shift: true)
 XCTAssertEqual(interactionDocument.state.annotations.last!.rect.width, 60)
@@ -134,6 +148,27 @@ interactionCanvas.commitText()
 XCTAssertEqual(interactionDocument.state.annotations.last!.text, "Hello\nWorld")
 interactionWindow.close()
 print("PASS canvas arrow movement, duplicate/delete, crop adjustment/undo, Shift-circle and multiline text")
+
+let quickDocument = EditorDocument(image: tests.fixture(), size: CGSize(width: 640, height: 400))
+let quickCanvas = EditorCanvas(document: quickDocument)
+quickCanvas.frame = quickDocument.fullRect
+let quickWindow = EditorWindow(contentRect: quickCanvas.frame, styleMask: .borderless, backing: .buffered, defer: false)
+quickWindow.contentView = quickCanvas
+quickCanvas.quickCropOnRelease = true
+var quickExports = 0
+quickCanvas.onQuickCrop = { quickExports += 1 }
+func quickEvent(_ type: NSEvent.EventType, _ x: CGFloat, _ y: CGFloat) -> NSEvent {
+    NSEvent.mouseEvent(with: type, location: CGPoint(x: x, y: y), modifierFlags: [],
+        timestamp: 0, windowNumber: quickWindow.windowNumber, context: nil, eventNumber: 1, clickCount: 1, pressure: 1)!
+}
+quickCanvas.mouseDown(with: quickEvent(.leftMouseDown, 40, 40))
+quickCanvas.mouseDragged(with: quickEvent(.leftMouseDragged, 240, 190))
+quickCanvas.mouseUp(with: quickEvent(.leftMouseUp, 240, 190))
+pump(0.05)
+XCTAssertEqual(quickExports, 1)
+XCTAssertEqual(quickDocument.render(cropped: true)!.width, 200)
+quickWindow.close()
+print("PASS initial quick-selection exports on release and confirmed crop can later expand")
 
 XCTAssertEqual(EditorColor(hex: "5785d1")!.hex, "5785D1")
 XCTAssertTrue(EditorColor(hex: "#5785D1") == nil)
@@ -163,15 +198,17 @@ clipboardSession.outputMode = .fileOnly
 XCTAssertTrue(Preferences.shared.outputMode == .both)
 clipboardSession.outputMode = .clipboardOnly
 clipboardSession.requestCancel()
+XCTAssertTrue(clipboardSession.phase == .suspended)
+clipboardSession.resumeLastEdit()
 XCTAssertTrue(clipboardSession.phase == .editing)
-clipboardSession.requestCancel()
+clipboardSession.cancel()
 XCTAssertTrue(clipboardSession.phase == .idle)
 clipboardSession.openClipboard(pasteboard: clipboard)
 clipboardSession.finish()
 XCTAssertTrue(clipboardSession.phase == .idle)
 XCTAssertEqual(CaptureService.shared.results.last!.width, 640)
 clipboard.releaseGlobally()
-print("PASS independent clipboard output, full-resolution import, double-Escape and export")
+print("PASS independent clipboard output, full-resolution import, suspend/resume and export")
 
 let ocrDocument = EditorDocument(image: tests.fixture(width: 1000, height: 400), size: CGSize(width: 1000, height: 400))
 var ocrState = EditorState()

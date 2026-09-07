@@ -192,12 +192,13 @@ final class EditorWindow: NSWindow {
 /// There is one session, including during asynchronous snapshot acquisition.
 final class EditorSession: NSObject, NSWindowDelegate {
     static let shared = EditorSession()
-    enum Phase { case idle, loading, editing, finishing }
+    enum Phase { case idle, loading, editing, suspended, finishing }
     private(set) var phase: Phase = .idle
     var isActive: Bool { phase != .idle }
     private var clipboardSession = false
-    private var exitArmedAt: Date?
     private var ocrRequest = UUID()
+    private var quickSelectionActive = false
+    var hasLastEdit: Bool { phase == .suspended }
     var outputMode: OutputMode {
         get { clipboardSession ? Preferences.shared.clipboardOutputMode : Preferences.shared.outputMode }
         set {
@@ -206,17 +207,16 @@ final class EditorSession: NSObject, NSWindowDelegate {
         }
     }
     func requestCancel() {
-        if let armed = exitArmedAt, Date().timeIntervalSince(armed) < 3 { cancel(); return }
-        canvas?.commitText()
-        _ = canvas?.cancelPending()
-        exitArmedAt = Date()
-        canvas?.showMessage("Press Esc again within 3 seconds to close without exporting")
+        suspend()
     }
     func windowShouldClose(_ sender: NSWindow) -> Bool { requestCancel(); return false }
     func openClipboard(pasteboard: NSPasteboard = .general) {
         guard !isActive else {
-            window?.makeKeyAndOrderFront(nil)
-            canvas?.showMessage("Finish or close the current edit before opening another image")
+            if phase == .suspended { resumeLastEdit() }
+            else {
+                window?.makeKeyAndOrderFront(nil)
+                canvas?.showMessage("Finish or hide the current edit before opening another image")
+            }
             return
         }
         guard let image = NSImage(pasteboard: pasteboard),
@@ -249,7 +249,7 @@ final class EditorSession: NSObject, NSWindowDelegate {
         scroll.magnification = min(1, min((size.width - 30) / document.size.width, (size.height - 80) / document.size.height))
         win.makeFirstResponder(view); view.choose(.select)
         bar.show(screen: win.screen ?? NSScreen.main!, parent: win)
-        view.showMessage("Clipboard image · ⌘S exports · output: " + outputMode.title)
+        view.showMessage("Clipboard image · ⌘↩ exports · output: " + outputMode.title)
     }
     private func installMonitor() {
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
@@ -265,9 +265,13 @@ final class EditorSession: NSObject, NSWindowDelegate {
     }
     private func wire(_ view: EditorCanvas, _ bar: EditorToolbar) {
         view.onChange = { [weak bar] in bar?.refresh() }
-        view.onInteraction = { [weak self] in self?.exitArmedAt = nil }
         view.onOCR = { [weak self] rect in self?.recognize(rect) }
         view.onMenu = { [weak bar] in bar?.actionMenu() }
+        view.onQuickCrop = { [weak self] in self?.finish(mode: Preferences.shared.quickSelectionOutputMode) }
+        view.onToolChosen = { [weak self, weak view] in
+            self?.quickSelectionActive = false
+            view?.quickCropOnRelease = false
+        }
     }
     func recognize(_ rect: CGRect? = nil) {
         guard let canvas, let image = canvas.document.render() else { return }
@@ -334,8 +338,8 @@ final class EditorSession: NSObject, NSWindowDelegate {
     func toggle() {
         switch phase {
         case .loading, .finishing: return
-        case .editing:
-            if canvas?.isDragging != true { finish() }
+        case .editing: return
+        case .suspended: resumeLastEdit()
         case .idle: begin()
         }
     }
@@ -344,6 +348,7 @@ final class EditorSession: NSObject, NSWindowDelegate {
         generation = UUID()
         let token = generation
         clipboardSession = false
+        quickSelectionActive = true
         installMonitor()
         let candidates = NSScreen.screens.compactMap { screen -> (CGDirectDisplayID, NSScreen)? in
             guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { return nil }
@@ -415,13 +420,14 @@ final class EditorSession: NSObject, NSWindowDelegate {
         newWindow.makeKeyAndOrderFront(nil)
         #endif
         newWindow.makeFirstResponder(newCanvas)
-        newCanvas.choose(previousTool)
+        newCanvas.quickCropOnRelease = quickSelectionActive
+        newCanvas.choose(previousTool, userInitiated: false)
         let newToolbar = EditorToolbar(canvas: newCanvas, session: self)
         toolbar = newToolbar
         wire(newCanvas, newToolbar)
         newToolbar.show(screen: screen, parent: newWindow)
     }
-    func finish() {
+    func finish(mode: OutputMode? = nil) {
         guard phase == .editing, let canvas else { return }
         canvas.commitText()
         canvas.applyCrop()
@@ -431,8 +437,37 @@ final class EditorSession: NSObject, NSWindowDelegate {
             AppDelegate.shared?.showErrorMessage("The edited image could not be rendered. Your edits are still open.")
             return
         }
-        if CaptureService.shared.deliverOnMain(result, mode: outputMode) { cancel() }
+        if CaptureService.shared.deliverOnMain(result, mode: mode ?? outputMode) { cancel() }
         else { phase = .editing }
+    }
+    func suspend() {
+        guard phase == .editing else { return }
+        canvas?.commitText()
+        timer?.invalidate(); timer = nil
+        if let monitor { NSEvent.removeMonitor(monitor) }; monitor = nil
+        NotificationCenter.default.removeObserver(self)
+        NSColorPanel.shared.orderOut(nil)
+        toolbar?.orderOut()
+        window?.orderOut(nil)
+        phase = .suspended
+        AppDelegate.shared?.refreshMenu()
+    }
+    func resumeLastEdit() {
+        guard phase == .suspended, let window, let canvas else { return }
+        phase = .editing
+        installMonitor()
+        if !clipboardSession { startTracking() }
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+        if let screen = window.screen { toolbar?.show(screen: screen, parent: window) }
+        window.makeFirstResponder(canvas)
+        AppDelegate.shared?.refreshMenu()
+    }
+    func activateUtility(_ tool: EditorTool) -> Bool {
+        guard phase == .editing, let canvas else { return false }
+        canvas.choose(tool)
+        window?.makeKeyAndOrderFront(nil)
+        return true
     }
     @objc func cancel() {
         generation = UUID()
@@ -441,9 +476,11 @@ final class EditorSession: NSObject, NSWindowDelegate {
         NotificationCenter.default.removeObserver(self)
         NSColorPanel.shared.orderOut(nil)
         toolbar?.close(); toolbar = nil
+        window?.delegate = nil
         window?.close(); window = nil; canvas = nil
         documents.removeAll(); screens.removeAll(); activeID = nil
-        phase = .idle; clipboardSession = false; exitArmedAt = nil
+        phase = .idle; clipboardSession = false; quickSelectionActive = false
+        AppDelegate.shared?.refreshMenu()
     }
     private func handleKey(_ event: NSEvent) -> Bool {
         guard let canvas else { return false }
@@ -452,9 +489,13 @@ final class EditorSession: NSObject, NSWindowDelegate {
         if event.keyCode == 53 {
             requestCancel(); return true
         }
-        exitArmedAt = nil
-        if (event.keyCode == 36 || event.keyCode == 76), event.modifierFlags.contains(.control) {
-            canvas.commitText(); return true
+        if event.keyCode == 36 || event.keyCode == 76 {
+            if event.modifierFlags.contains(.command) {
+                canvas.commitText(); finish(); return true
+            }
+            if event.modifierFlags.contains(.control) {
+                canvas.commitText(); return true
+            }
         }
         if canvas.isTyping { return false }
         let key = event.charactersIgnoringModifiers?.lowercased() ?? ""
@@ -462,13 +503,12 @@ final class EditorSession: NSObject, NSWindowDelegate {
             if key == "z" {
                 canvas.history(redo: event.modifierFlags.contains(.shift)); return true
             }
-            if key == "s" { finish(); return true }
             if key == "d" { canvas.duplicate(); return true }
             return false
         }
         guard event.modifierFlags.intersection([.option, .control]).isEmpty else { return false }
         if event.keyCode == 36 || event.keyCode == 76 {
-            if canvas.pendingCrop != nil { canvas.applyCrop() } else { finish() }
+            if canvas.pendingCrop != nil { canvas.applyCrop() }
             return true
         }
         if event.keyCode == 48 { toolbar?.toggleVisible(); return true }
@@ -497,6 +537,10 @@ final class EditorCanvas: NSView, NSTextViewDelegate {
     var onInteraction: (() -> Void)?
     var onOCR: ((CGRect) -> Void)?
     var onMenu: (() -> NSMenu?)?
+    var onQuickCrop: (() -> Void)?
+    var onToolChosen: (() -> Void)?
+    var onColorPicked: ((String, NSColor) -> Void)?
+    var quickCropOnRelease = false
     private var message = ""
     private var messageToken = UUID()
     private var pickerPoint: CGPoint?
@@ -523,6 +567,7 @@ final class EditorCanvas: NSView, NSTextViewDelegate {
         pickerPoint = point(event); needsDisplay = true
     }
     override func mouseExited(with event: NSEvent) { pickerPoint = nil; needsDisplay = true }
+    func setPickerPoint(_ point: CGPoint) { pickerPoint = point; needsDisplay = true }
     func sampledColor(_ point: CGPoint) -> NSColor? {
         guard let sampler else { return nil }
         let x = min(sampler.pixelsWide - 1, max(0, Int(point.x / document.size.width * CGFloat(sampler.pixelsWide))))
@@ -549,14 +594,15 @@ final class EditorCanvas: NSView, NSTextViewDelegate {
         bitmap = document.state.annotations.isEmpty ? document.image : document.render()
         super.init(frame: .zero)
         setAccessibilityElement(true)
-        setAccessibilityLabel("Image editor. A arrow, R rectangle, E ellipse, T text, B blur, C crop, I color picker, O text recognition. Press Escape twice to close.")
+        setAccessibilityLabel("Image editor. A arrow, R rectangle, E ellipse, T text, B blur, C crop, I color picker, O text recognition. Command Enter exports. Escape hides and preserves.")
     }
     required init?(coder: NSCoder) { fatalError() }
     override func resetCursorRects() {
         addCursorRect(bounds, cursor: tool == .select ? .arrow : tool == .text ? .iBeam : .crosshair)
     }
-    func choose(_ next: EditorTool) {
+    func choose(_ next: EditorTool, userInitiated: Bool = true) {
         onInteraction?()
+        if userInitiated { onToolChosen?() }
         commitText(); dragStart = nil; draft = nil; original = nil; cropMoveOrigin = nil
         if next == .picker {
             samplingTool = tool == .picker ? samplingTool : tool
@@ -585,7 +631,7 @@ final class EditorCanvas: NSView, NSTextViewDelegate {
     var selectedTool: EditorTool { document.state.annotations.first(where: { $0.id == selected })?.tool ?? tool }
     private func point(_ event: NSEvent) -> CGPoint {
         let p = convert(event.locationInWindow, from: nil)
-        let r = document.cropRect
+        let r = tool == .crop ? document.fullRect : document.cropRect
         return CGPoint(x: min(max(p.x, r.minX), r.maxX), y: min(max(p.y, r.minY), r.maxY))
     }
     override func mouseDown(with event: NSEvent) {
@@ -596,8 +642,9 @@ final class EditorCanvas: NSView, NSTextViewDelegate {
         if tool == .picker {
             if let color = sampledColor(p) {
                 let hex = EditorColor(color).hex
+                if let onColorPicked { onColorPicked(hex, color); return }
                 NSPasteboard.general.clearContents(); NSPasteboard.general.setString(hex, forType: .string)
-                choose(samplingTool)
+                choose(samplingTool, userInitiated: false)
                 var next = style
                 if event.modifierFlags.contains(.option) { next.fill = EditorColor(color) }
                 else { next.color = EditorColor(color) }
@@ -656,7 +703,7 @@ final class EditorCanvas: NSView, NSTextViewDelegate {
         guard let start = dragStart else { return }
         var p = point(event)
         if tool == .crop, let crop = cropMoveOrigin {
-            let boundary = document.cropRect
+            let boundary = document.fullRect
             let x = min(max(crop.minX + p.x - start.x, boundary.minX), boundary.maxX - crop.width)
             let y = min(max(crop.minY + p.y - start.y, boundary.minY), boundary.maxY - crop.height)
             draft?.start = CGPoint(x: x, y: y)
@@ -687,7 +734,13 @@ final class EditorCanvas: NSView, NSTextViewDelegate {
         defer { dragStart = nil; draft = nil; original = nil; cropMoveOrigin = nil; changed() }
         guard let a = draft else { return }
         if tool == .crop {
-            if a.rect.width >= 2 && a.rect.height >= 2 { pendingCrop = a.rect.intersection(document.cropRect) }
+            if a.rect.width >= 2 && a.rect.height >= 2 {
+                pendingCrop = a.rect.intersection(document.fullRect)
+                if quickCropOnRelease {
+                    applyCrop()
+                    DispatchQueue.main.async { [weak self] in self?.onQuickCrop?() }
+                }
+            }
             return
         }
         if tool == .ocr { if a.rect.width >= 2 && a.rect.height >= 2 { onOCR?(a.rect) }; return }
@@ -701,7 +754,7 @@ final class EditorCanvas: NSView, NSTextViewDelegate {
     }
     func applyCrop() {
         guard let rect = pendingCrop else { return }
-        var state = document.state; state.crop = rect.intersection(document.cropRect)
+        var state = document.state; state.crop = rect.intersection(document.fullRect)
         document.commit(state); pendingCrop = nil; selected = nil; changed()
     }
     func cancelPending() -> Bool {
@@ -902,6 +955,109 @@ enum EditorOCR {
     }
 }
 
+final class GlobalUtilitySession {
+    static let shared = GlobalUtilitySession()
+    enum Mode { case picker, ocr }
+    private(set) var isActive = false
+    private var token = UUID()
+    private var window: EditorWindow?
+    private var monitor: Any?
+
+    func begin(_ mode: Mode) {
+        if EditorSession.shared.activateUtility(mode == .picker ? .picker : .ocr) { return }
+        guard !isActive else { return }
+        guard let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }),
+              let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
+            AppDelegate.shared?.showErrorMessage("No display is available under the pointer."); return
+        }
+        isActive = true; token = UUID()
+        let requestToken = token
+        let id = number.uint32Value
+        Task { @MainActor in
+            do {
+                let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+                guard let display = content.displays.first(where: { $0.displayID == id }) else {
+                    throw NSError(domain: "ShotKey", code: 10, userInfo: [NSLocalizedDescriptionKey: "The display under the pointer is unavailable."])
+                }
+                let filter = SCContentFilter(display: display, excludingApplications: [], exceptingWindows: [])
+                let config = SCStreamConfiguration()
+                config.width = CGDisplayPixelsWide(id); config.height = CGDisplayPixelsHigh(id)
+                config.showsCursor = false; config.capturesAudio = false
+                let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+                guard self.token == requestToken, self.isActive else { return }
+                self.show(image: image, screen: screen, mode: mode)
+            } catch {
+                guard self.token == requestToken else { return }
+                self.cancel()
+                if !CGPreflightScreenCaptureAccess() {
+                    _ = CGRequestScreenCaptureAccess()
+                    AppDelegate.shared?.showErrorMessage("Screen Recording permission is required. Quit and reopen ShotKey after granting access.")
+                } else { AppDelegate.shared?.showError(error) }
+            }
+        }
+    }
+    private func show(image: CGImage, screen: NSScreen, mode: Mode) {
+        let document = EditorDocument(image: image, size: screen.frame.size)
+        let canvas = EditorCanvas(document: document)
+        canvas.frame = CGRect(origin: .zero, size: screen.frame.size)
+        canvas.autoresizingMask = [.width, .height]
+        let win = EditorWindow(contentRect: canvas.frame, styleMask: .borderless,
+            backing: .buffered, defer: false, screen: screen)
+        win.setFrame(screen.frame, display: true); win.level = .floating
+        win.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        win.isReleasedWhenClosed = false; win.contentView = canvas
+        window = win
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            if event.keyCode == 53 { self?.cancel(); return nil }
+            return event
+        }
+        NSApp.activate(ignoringOtherApps: true); win.makeKeyAndOrderFront(nil); win.makeFirstResponder(canvas)
+        if mode == .picker {
+            canvas.choose(.picker, userInitiated: false)
+            let global = NSEvent.mouseLocation
+            canvas.setPickerPoint(CGPoint(x: global.x - screen.frame.minX, y: global.y - screen.frame.minY))
+            canvas.onColorPicked = { [weak self] hex, color in
+                NSPasteboard.general.clearContents(); NSPasteboard.general.setString(hex, forType: .string)
+                self?.cancel()
+                AppDelegate.shared?.showColorCopied(hex, color: color, screen: screen)
+            }
+        } else {
+            canvas.choose(.ocr, userInitiated: false)
+            canvas.showMessage("Drag around text · Escape cancels")
+            canvas.onOCR = { [weak self, weak canvas] rect in
+                guard let self, let canvas, let rendered = canvas.document.render() else { return }
+                let sx = CGFloat(rendered.width) / canvas.document.size.width
+                let sy = CGFloat(rendered.height) / canvas.document.size.height
+                let pixels = CGRect(x: rect.minX * sx, y: (canvas.document.size.height - rect.maxY) * sy,
+                                    width: rect.width * sx, height: rect.height * sy).integral
+                guard let selected = rendered.cropping(to: pixels) else { return }
+                let requestToken = self.token
+                self.cancel(keepToken: true)
+                AppDelegate.shared?.showUtilityMessage("Reading text…", screen: screen)
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let result = Result { try EditorOCR.recognize(selected) }
+                    DispatchQueue.main.async {
+                        guard self.token == requestToken else { return }
+                        switch result {
+                        case .success(let text) where !text.isEmpty:
+                            NSPasteboard.general.clearContents(); NSPasteboard.general.setString(text, forType: .string)
+                            AppDelegate.shared?.showUtilityMessage("✓ Text copied · line breaks preserved", screen: screen)
+                        case .success: AppDelegate.shared?.showUtilityMessage("No text found", screen: screen)
+                        case .failure(let error): AppDelegate.shared?.showError(error)
+                        }
+                    }
+                }
+            }
+        }
+    }
+    func cancel(keepToken: Bool = false) {
+        if !keepToken { token = UUID() }
+        if let monitor { NSEvent.removeMonitor(monitor) }; monitor = nil
+        window?.orderOut(nil); window?.close(); window = nil
+        isActive = false
+    }
+}
+
 final class EditorToolbar: NSObject, NSTextFieldDelegate {
     private let panel: NSPanel
     private weak var canvas: EditorCanvas?
@@ -964,13 +1120,20 @@ final class EditorToolbar: NSObject, NSTextFieldDelegate {
         let more = NSButton(image: NSImage(systemSymbolName: "ellipsis.circle", accessibilityDescription: "Editor actions")!,
                             target: self, action: #selector(showMenu(_:)))
         more.translatesAutoresizingMaskIntoConstraints = false; more.bezelStyle = .rounded
+        let save = NSButton(image: NSImage(systemSymbolName: "square.and.arrow.down", accessibilityDescription: "Export image")!,
+                            target: self, action: #selector(finish))
+        save.translatesAutoresizingMaskIntoConstraints = false; save.bezelStyle = .rounded
+        save.toolTip = "Export image (Command–Enter)"
         let root = panel.contentView!
-        root.addSubview(scroll); root.addSubview(more)
+        root.addSubview(scroll); root.addSubview(save); root.addSubview(more)
         NSLayoutConstraint.activate([
             scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 6),
             scroll.topAnchor.constraint(equalTo: root.topAnchor, constant: 4),
             scroll.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -4),
-            scroll.trailingAnchor.constraint(equalTo: more.leadingAnchor, constant: -3),
+            scroll.trailingAnchor.constraint(equalTo: save.leadingAnchor, constant: -3),
+            save.widthAnchor.constraint(equalToConstant: 32),
+            save.centerYAnchor.constraint(equalTo: root.centerYAnchor),
+            save.trailingAnchor.constraint(equalTo: more.leadingAnchor, constant: -3),
             more.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -6),
             more.centerYAnchor.constraint(equalTo: root.centerYAnchor),
             more.widthAnchor.constraint(equalToConstant: 32),
@@ -991,6 +1154,7 @@ final class EditorToolbar: NSObject, NSTextFieldDelegate {
     }
     func owns(_ window: NSWindow) -> Bool { panel == window }
     func close() { panel.parent?.removeChildWindow(panel); panel.close() }
+    func orderOut() { panel.orderOut(nil) }
     func toggleVisible() { if panel.isVisible { panel.orderOut(nil) } else { panel.orderFrontRegardless() } }
     func refresh() {
         guard let canvas else { return }
@@ -1016,7 +1180,7 @@ final class EditorToolbar: NSObject, NSTextFieldDelegate {
         row.layoutSubtreeIfNeeded()
         if let parent = panel.parent {
             let maxWidth = max(300, min(parent.frame.width - 20, parent.screen?.visibleFrame.width ?? 900))
-            let target = min(maxWidth, row.fittingSize.width + 56)
+            let target = min(maxWidth, row.fittingSize.width + 91)
             panel.setFrame(CGRect(x: parent.frame.midX - target / 2, y: panel.frame.minY, width: target, height: 44), display: true)
         }
     }
@@ -1027,7 +1191,7 @@ final class EditorToolbar: NSObject, NSTextFieldDelegate {
             item.target = self; item.isEnabled = enabled; menu.addItem(item)
         }
         menu.autoenablesItems = false
-        add("Export image · ⌘S", #selector(finish))
+        add("Export image · ⌘↩", #selector(finish))
         add("Apply crop · Enter", #selector(crop), enabled: canvas?.pendingCrop != nil)
         add("Undo · ⌘Z", #selector(undo), enabled: canvas?.document.undoStates.isEmpty == false)
         add("Redo · ⇧⌘Z", #selector(redo), enabled: canvas?.document.redoStates.isEmpty == false)
@@ -1039,7 +1203,8 @@ final class EditorToolbar: NSObject, NSTextFieldDelegate {
             menu.addItem(item)
         }
         menu.addItem(.separator())
-        add("Close without exporting · Esc twice", #selector(cancel))
+        add("Hide and preserve edit · Esc", #selector(cancel))
+        add("Discard edit permanently", #selector(discard))
         return menu
     }
     @objc private func showMenu(_ sender: NSButton) { actionMenu().popUp(positioning: nil, at: CGPoint(x: 0, y: sender.bounds.minY), in: sender) }
@@ -1072,6 +1237,7 @@ final class EditorToolbar: NSObject, NSTextFieldDelegate {
     @objc private func ocr() { canvas?.commitText(); session?.recognize() }
     @objc private func finish() { panel.makeFirstResponder(nil); session?.finish() }
     @objc private func cancel() { session?.requestCancel() }
+    @objc private func discard() { session?.cancel() }
     #if EDITOR_TESTS
     func presentPreview(_ parent: NSWindow) {
         parent.addChildWindow(panel, ordered: .above)

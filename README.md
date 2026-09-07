@@ -1,6 +1,6 @@
 # ShotKey
 
-The experimental 1.4 editor is documented in [Frozen screenshot editor](docs/EDITOR.md). The `checkpoint/v1.2.0` branch preserves the original release.
+The 1.5 editor is documented in [Frozen screenshot editor](docs/EDITOR.md). The `checkpoint/v1.2.0` branch preserves the original release.
 
 <p align="center">
   <img src="docs/images/shotkey-icon.png" width="128" alt="ShotKey app icon">
@@ -24,6 +24,7 @@ Then I kept reaching for a few more things: an arrow, a quick crop, a color from
 - Lets you drag to capture any rectangular area.
 - Works with an external or ultrawide display as well as the Mac's built-in screen.
 - Lets you choose your own global shortcuts.
+- Provides global exact-pixel color picking and on-screen OCR without opening the full editor.
 - Offers three clear results after every capture:
   - save the image and copy it to the clipboard;
   - copy it to the clipboard only;
